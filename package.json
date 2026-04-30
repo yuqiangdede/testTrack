@@ -1,0 +1,13 @@
+{
+  "name": "ship-situation-replay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server/index.js",
+    "start": "node server/index.js",
+    "check": "node scripts/check-syntax.mjs",
+    "backfill:dry-run": "node scripts/backfill-clickhouse-100-days.mjs",
+    "backfill:execute": "node scripts/backfill-clickhouse-100-days.mjs --execute"
+  }
+}

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>船舶态势与轨迹回放</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <strong>船舶态势</strong>
+          <span>AMap + ClickHouse</span>
+        </div>
+        <button class="nav active" data-mode="realtime"><span></span>实时位置</button>
+        <button class="nav" data-mode="analysis"><span></span>态势分析</button>
+        <button class="nav" data-mode="single"><span></span>单船轨迹</button>
+        <button class="nav" data-mode="multi"><span></span>多船轨迹</button>
+        <button class="nav" data-mode="global"><span></span>全域回放</button>
+      </aside>
+      <main class="workspace">
+        <header class="topbar">
+          <h1>船舶态势与轨迹回放</h1>
+          <div id="status" class="status">准备加载地图</div>
+        </header>
+        <section class="content">
+          <div class="map-wrap">
+            <div id="map" class="map"></div>
+            <div id="error" class="error-panel hidden"></div>
+            <div id="ship-hover-card" class="ship-hover-card hidden"></div>
+          </div>
+          <aside class="panel">
+            <section class="panel-section">
+              <h2 id="panel-title">实时位置展示</h2>
+              <div class="metric-grid">
+                <div class="metric"><span>最新船位</span><strong id="metric-latest">0</strong></div>
+                <div class="metric"><span>热力网格</span><strong id="metric-density">0</strong></div>
+                <div class="metric"><span>轨迹点</span><strong id="metric-track">0</strong></div>
+                <div class="metric"><span>轨迹船舶</span><strong id="metric-ships">0</strong></div>
+              </div>
+            </section>
+            <section id="time-section" class="panel-section hidden">
+              <h3>时间范围</h3>
+              <label>开始<input id="start" type="datetime-local" value="2026-04-17T00:00" /></label>
+              <label>结束<input id="end" type="datetime-local" value="2026-04-19T23:59" /></label>
+            </section>
+            <section id="realtime-panel" class="panel-section mode-panel">
+              <label>展示类型
+                <select id="realtime-type">
+                  <option value="ais" selected>AIS 船只</option>
+                  <option value="nonais">雷达船</option>
+                  <option value="all">全部</option>
+                </select>
+              </label>
+              <div class="time-grid">
+                <label>时间窗开始<input id="realtime-start" type="datetime-local" step="1" /></label>
+                <label>时间窗结束<input id="realtime-end" type="datetime-local" step="1" /></label>
+              </div>
+              <button id="load-latest" class="primary">刷新全部最新船位</button>
+              <p>服务端预热每艘船最新位置的内存缓存，缓存命中后一次性返回全部最新船位。</p>
+            </section>
+            <section id="analysis-panel" class="panel-section mode-panel hidden">
+              <button id="load-density" class="primary">按当前视野生成热力</button>
+              <p>服务端按 bbox、时间窗和 zoom 聚合密度点，不返回海量原始点。</p>
+            </section>
+            <section id="single-panel" class="panel-section mode-panel hidden">
+              <h3>船舶选择</h3>
+              <label>船舶编号<input id="ship-id" value="LIAOCHANGYUYANG61659" /></label>
+              <button id="load-single" class="primary">查询单船轨迹</button>
+            </section>
+            <section id="multi-panel" class="panel-section mode-panel hidden">
+              <div class="actions">
+                <button id="draw-box" class="primary">框选工具</button>
+                <button id="load-candidates">当前视野查船</button>
+                <button id="load-multi">播放所选船</button>
+              </div>
+              <h3>候选船舶（最多 100）</h3>
+              <div id="ship-list" class="ship-list"></div>
+            </section>
+            <section id="global-panel" class="panel-section mode-panel hidden">
+              <h3>小时片段</h3>
+              <label>片段开始<input id="segment-start" type="datetime-local" value="2026-04-17T09:00" /></label>
+              <button id="load-global" class="primary">加载当前视野 1 小时</button>
+              <button id="clear-global">清空全域轨迹</button>
+            </section>
+            <section id="player" class="panel-section player hidden">
+              <h3>播放控制</h3>
+              <div class="button-row">
+                <button id="play" class="round primary">▶</button>
+                <button id="stop" class="round">■</button>
+                <select id="speed">
+                  <option value="1">1x</option>
+                  <option value="2" selected>2x</option>
+                  <option value="5">5x</option>
+                  <option value="10">10x</option>
+                </select>
+              </div>
+              <input id="progress" type="range" min="0" max="0" value="0" />
+              <p>时间：<span id="active-time">--</span></p>
+            </section>
+          </aside>
+        </section>
+      </main>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

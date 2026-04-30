@@ -1,0 +1,47 @@
+{
+  "clickhouse": {
+    "jdbcUrl": "jdbc:clickhouse://127.0.0.1:8123/default",
+    "username": "default",
+    "password": ""
+  },
+  "tables": {
+    "track": "tb_ais_event_simple_info",
+    "bucketIndex": "tb_ship_bucket_index"
+  },
+  "columns": {
+    "shipId": "ship_serial_no",
+    "shipName": "ship_name",
+    "eventTime": "event_time",
+    "longitude": "longitude_wgs",
+    "latitude": "latitude_wgs",
+    "speed": "ground_speed",
+    "heading": "ground_course"
+  },
+  "bucketIndexColumns": {
+    "shipId": "ship_serial_no",
+    "bucketStart": "bucket_start",
+    "minLng": "min_lng",
+    "maxLng": "max_lng",
+    "minLat": "min_lat",
+    "maxLat": "max_lat"
+  },
+  "query": {
+    "latestLookbackHours": 5,
+    "realtimeWindowHours": 2,
+    "realtimePollSeconds": 5,
+    "clickhouseTimeoutSeconds": 30,
+    "latestPageSize": 30000,
+    "maxLatestShips": 300000,
+    "maxRealtimeDeltaShips": 10000,
+    "maxDensityCells": 30000,
+    "maxTrackPointsPerShip": 3000,
+    "maxMultiShips": 100,
+    "maxGlobalSegmentPoints": 50000,
+    "globalSegmentHours": 1
+  },
+  "map": {
+    "coordinateSystem": "wgs84",
+    "defaultCenter": [122.4, 39.2],
+    "defaultZoom": 8
+  }
+}
