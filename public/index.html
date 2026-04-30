@@ -30,6 +30,32 @@
             <div id="map" class="map"></div>
             <div id="error" class="error-panel hidden"></div>
             <div id="ship-hover-card" class="ship-hover-card hidden"></div>
+            <button id="candidate-expand" class="candidate-expand hidden" type="button">展开候选</button>
+            <div id="candidate-drawer" class="candidate-drawer hidden">
+              <div class="candidate-drawer-header">
+                <div class="candidate-drawer-title">
+                  <strong>候选船舶</strong>
+                  <span>已加载 <em id="candidate-loaded-pages">0</em> 页，<em id="candidate-page-size">100</em> 条/页，<em id="candidate-total-loaded">0</em> 艘，已选 <em id="candidate-selected-count">0</em> 艘，查询耗时 <em id="candidate-query-elapsed">--</em></span>
+                </div>
+                <div class="candidate-header-actions">
+                  <label class="candidate-toggle"><input id="candidate-type-ais" type="checkbox" checked /> AIS</label>
+                  <label class="candidate-toggle"><input id="candidate-type-radar" type="checkbox" /> 雷达</label>
+                  <button id="candidate-play" class="candidate-play primary" type="button">播放</button>
+                  <button id="candidate-close" class="candidate-close" type="button">收起</button>
+                </div>
+              </div>
+              <div class="candidate-page-row">
+                <button id="candidate-prev-page" type="button">上一页</button>
+                <button id="candidate-select-page" type="button">当前页全选</button>
+                <button id="candidate-select-loaded" type="button">已载全选</button>
+                <button id="candidate-next-page" type="button">下一页</button>
+                <button id="candidate-more-pages" class="primary" type="button">更多10页</button>
+              </div>
+              <div class="candidate-page-summary">
+                第 <strong id="candidate-current-page">1</strong> 页 / 共 <strong id="candidate-total-pages">0</strong> 页
+              </div>
+              <div id="candidate-list" class="candidate-list"></div>
+            </div>
           </div>
           <aside class="panel">
             <section id="realtime-stats-section" class="panel-section">
@@ -62,10 +88,24 @@
                 <div class="metric"><span>当前船轨迹点数量</span><strong id="metric-single-track-points">0</strong></div>
               </div>
             </section>
+            <section id="multi-stats-section" class="panel-section hidden">
+              <h2>多船轨迹统计</h2>
+              <div class="metric-grid">
+                <div class="metric"><span>数据库轨迹点总量</span><strong id="metric-multi-db-points">0</strong></div>
+                <div class="metric"><span>数据库船舶总量</span><strong id="metric-multi-db-ships">0</strong></div>
+                <div class="metric"><span>当前时间窗轨迹点总量</span><strong id="metric-multi-window-points">0</strong></div>
+                <div class="metric"><span>当前时间窗船舶总量</span><strong id="metric-multi-window-ships">0</strong></div>
+                <div class="metric"><span>时间窗 + 框选轨迹点总量</span><strong id="metric-multi-bbox-points">0</strong></div>
+                <div class="metric"><span>时间窗 + 框选船舶总量</span><strong id="metric-multi-bbox-ships">0</strong></div>
+                <div class="metric"><span>人工选中船舶的轨迹点数量</span><strong id="metric-multi-selected-points">0</strong></div>
+              </div>
+            </section>
             <section id="time-section" class="panel-section hidden">
               <h3>时间范围</h3>
-              <label>开始<input id="start" type="datetime-local" value="2026-04-17T00:00" /></label>
-              <label>结束<input id="end" type="datetime-local" value="2026-04-19T23:59" /></label>
+              <div class="time-inline">
+                <label>开始<input id="start" type="datetime-local" value="2026-04-17T00:00" /></label>
+                <label>结束<input id="end" type="datetime-local" value="2026-04-19T23:59" /></label>
+              </div>
             </section>
             <section id="realtime-panel" class="panel-section mode-panel">
               <label>展示类型
@@ -102,16 +142,15 @@
                 <div></div>
               </div>
               <p>默认按实时位置带入的时间点，向前 12 小时、向后 0 小时回放，可按需要修改。</p>
-              <button id="load-single" class="primary">查询单船轨迹</button>
+              <div class="button-row">
+                <button id="load-single" class="primary">查询单船轨迹</button>
+                <button id="exit-single-track" type="button">退出单船轨迹</button>
+              </div>
             </section>
             <section id="multi-panel" class="panel-section mode-panel hidden">
-              <div class="actions">
-                <button id="draw-box" class="primary">框选工具</button>
-                <button id="load-candidates">当前视野查船</button>
-                <button id="load-multi">播放所选船</button>
+              <div class="actions multi-actions">
+                <button id="draw-box">框选</button>
               </div>
-              <h3>候选船舶（最多 100）</h3>
-              <div id="ship-list" class="ship-list"></div>
             </section>
             <section id="global-panel" class="panel-section mode-panel hidden">
               <h3>小时片段</h3>

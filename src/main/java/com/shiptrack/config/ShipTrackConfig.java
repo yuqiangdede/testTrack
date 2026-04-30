@@ -51,6 +51,7 @@ public class ShipTrackConfig {
     public int maxRealtimeDeltaShips = 10000;
     public int maxDensityCells = 30000;
     public int maxTrackPointsPerShip = 3000;
+    public int maxSingleTrackPoints = 1200;
     public int maxMultiShips = 100;
     public int maxGlobalSegmentPoints = 50000;
     public int globalSegmentHours = 1;

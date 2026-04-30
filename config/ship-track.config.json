@@ -35,6 +35,7 @@
     "maxRealtimeDeltaShips": 10000,
     "maxDensityCells": 30000,
     "maxTrackPointsPerShip": 3000,
+    "maxSingleTrackPoints": 1200,
     "maxMultiShips": 100,
     "maxGlobalSegmentPoints": 50000,
     "globalSegmentHours": 1

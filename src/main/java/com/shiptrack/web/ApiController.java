@@ -99,6 +99,17 @@ public class ApiController {
     return trace("/api/stats/database", repository::databaseStats);
   }
 
+  @GetMapping("/api/stats/multi-summary")
+  public Map<String, Object> multiSummary(@RequestParam String start, @RequestParam String end,
+      @RequestParam(required = false) String west, @RequestParam(required = false) String south,
+      @RequestParam(required = false) String east, @RequestParam(required = false) String north) {
+    return trace("/api/stats/multi-summary", () -> {
+      TimeWindow time = realtimeService.validateTimeWindow(start, end);
+      BBox bbox = bboxOrNull(west, south, east, north);
+      return repository.multiStats(time.start(), time.end(), bbox);
+    });
+  }
+
   @GetMapping("/api/analysis/density")
   public Map<String, Object> density(@RequestParam(required = false) String start, @RequestParam(required = false) String end,
       @RequestParam(required = false) String timePoint, @RequestParam(required = false) String minutes,
@@ -119,17 +130,21 @@ public class ApiController {
         throw new IllegalArgumentException("shipId parameter is required");
       }
       TimeWindow time = realtimeService.validateTimeWindow(start, end);
-      return Map.of("items", repository.trackRows(List.of(shipId), time.start(), time.end(), realtimeService.validateZoom(zoom), null, "single"));
+      return Map.of("items", repository.singleTrackRows(shipId, time.start(), time.end(), realtimeService.validateZoom(zoom), null));
     });
   }
 
   @GetMapping("/api/tracks/candidates")
   public Map<String, Object> candidates(@RequestParam String start, @RequestParam String end, @RequestParam String west,
-      @RequestParam String south, @RequestParam String east, @RequestParam String north, @RequestParam(required = false) String limit) {
+      @RequestParam String south, @RequestParam String east, @RequestParam String north,
+      @RequestParam(required = false) String page, @RequestParam(required = false) String pageSize,
+      @RequestParam(required = false) String shipTypes) {
     return trace("/api/tracks/candidates", () -> {
       TimeWindow time = realtimeService.validateTimeWindow(start, end);
-      int limitValue = limit == null || limit.isBlank() ? config.query.maxMultiShips : Integer.parseInt(limit);
-      return Map.of("items", repository.candidates(time.start(), time.end(), bbox(west, south, east, north), limitValue));
+      int pageValue = page == null || page.isBlank() ? 1 : Integer.parseInt(page);
+      int pageSizeValue = pageSize == null || pageSize.isBlank() ? 100 : Integer.parseInt(pageSize);
+      List<String> shipTypeValues = parseShipTypes(shipTypes);
+      return Map.of("items", repository.candidates(time.start(), time.end(), bbox(west, south, east, north), pageValue, pageSizeValue, shipTypeValues));
     });
   }
 
@@ -177,6 +192,20 @@ public class ApiController {
       return realtimeService.validateTimeWindow(start, end);
     }
     return realtimeService.realtimeWindowFromParams(null, null);
+  }
+
+  private List<String> parseShipTypes(String shipTypes) {
+    if (shipTypes == null || shipTypes.isBlank()) {
+      return List.of("ais");
+    }
+    List<String> values = new java.util.ArrayList<>();
+    for (String value : shipTypes.split(",")) {
+      String normalized = value == null ? "" : value.trim().toLowerCase();
+      if (("ais".equals(normalized) || "radar".equals(normalized)) && !values.contains(normalized)) {
+        values.add(normalized);
+      }
+    }
+    return values.isEmpty() ? List.of("ais") : values;
   }
 
   private <T> T trace(String endpoint, Supplier<T> action) {

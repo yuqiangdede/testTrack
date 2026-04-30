@@ -97,7 +97,17 @@ public class TrackRepository {
   }
 
   public Map<String, Object> windowStats(String start, String end) {
+    return windowStats(start, end, null);
+  }
+
+  public Map<String, Object> windowStats(String start, String end, BBox bbox) {
     ShipTrackConfig.Columns c = config.columns;
+    String bboxFilter = bbox == null ? "" : """
+        AND %s BETWEEN {west: Float64} AND {east: Float64}
+        AND %s BETWEEN {south: Float64} AND {north: Float64}
+        """.formatted(ident(c.longitude), ident(c.latitude));
+    Map<String, Object> params = params("start", start, "end", end);
+    putBbox(params, bbox);
     List<Map<String, Object>> rows = clickHouse.query("""
         SELECT
           count() AS trackPoints,
@@ -105,11 +115,13 @@ public class TrackRepository {
         FROM %s
         WHERE %s >= %s
           AND %s < %s
+          %s
         """.formatted(
         ident(c.shipId),
         ident(config.tables.track),
         ident(c.eventTime), sqlDateParam("start"),
-        ident(c.eventTime), sqlDateParam("end")), params("start", start, "end", end));
+        ident(c.eventTime), sqlDateParam("end"),
+        bboxFilter), params);
     Map<String, Object> row = rows.isEmpty() ? Map.of() : rows.get(0);
     return Map.of(
         "trackPoints", toLong(row.get("trackPoints")),
@@ -232,24 +244,65 @@ public class TrackRepository {
     return toLong(row.get("points"));
   }
 
-  public List<Map<String, Object>> candidates(String start, String end, BBox bbox, int limit) {
+  public List<Map<String, Object>> candidates(String start, String end, BBox bbox, int page, int pageSize, List<String> shipTypes) {
     ShipTrackConfig.BucketIndexColumns ic = config.bucketIndexColumns;
+    ShipTrackConfig.Columns c = config.columns;
+    int limit = Math.max(1, Math.min(pageSize, 100));
+    int offset = Math.max(0, (Math.max(1, page) - 1) * limit);
+    List<String> normalizedTypes = normalizeShipTypes(shipTypes);
+    String typeFilter = normalizedTypes.size() == 1 ? "WHERE shipType = '" + normalizedTypes.get(0) + "'" : "";
     String query = """
+        WITH
+          base AS (
+            SELECT
+              %s AS shipId,
+              toString(min(%s)) AS firstTime,
+              toString(max(%s)) AS lastTime,
+              count() AS points
+            FROM %s
+            WHERE %s >= %s
+              AND %s < %s
+              AND %s >= {west: Float64}
+              AND %s <= {east: Float64}
+              AND %s >= {south: Float64}
+              AND %s <= {north: Float64}
+            GROUP BY %s
+          ),
+          typed AS (
+            SELECT
+              base.shipId AS shipId,
+              base.firstTime AS firstTime,
+              base.lastTime AS lastTime,
+              base.points AS points,
+              if(match(toString(base.shipId), '%s'), ifNull(type.isAis, 1), 0) AS isAis,
+              if(match(toString(base.shipId), '%s'), if(ifNull(type.isAis, 1) = 1, 'ais', 'radar'), 'radar') AS shipType,
+              ifNull(type.shipName, '') AS shipName
+            FROM base
+            LEFT JOIN
+            (
+              SELECT
+                %s AS shipId,
+                argMax(%s, %s) AS shipName,
+                argMax(isAis, %s) AS isAis
+              FROM %s
+              WHERE %s >= %s
+                AND %s < %s
+                AND %s IN (SELECT shipId FROM base)
+              GROUP BY %s
+            ) AS type USING (shipId)
+          )
         SELECT
-          %s AS shipId,
-          toString(min(%s)) AS firstTime,
-          toString(max(%s)) AS lastTime,
-          count() AS points
-        FROM %s
-        WHERE %s >= %s
-          AND %s < %s
-          AND %s >= {west: Float64}
-          AND %s <= {east: Float64}
-          AND %s >= {south: Float64}
-          AND %s <= {north: Float64}
-        GROUP BY %s
-        ORDER BY points DESC
-        LIMIT {limit: UInt32}
+          shipId,
+          shipName,
+          firstTime,
+          lastTime,
+          points,
+          isAis,
+          shipType
+        FROM typed
+        %s
+        ORDER BY if(shipType = 'ais', 0, 1) ASC, points DESC, shipId ASC
+        LIMIT {limit: UInt32} OFFSET {offset: UInt32}
         """.formatted(
         ident(ic.shipId),
         ident(ic.bucketStart),
@@ -261,15 +314,64 @@ public class TrackRepository {
         ident(ic.minLng),
         ident(ic.maxLat),
         ident(ic.minLat),
-        ident(ic.shipId));
-    Map<String, Object> params = params("start", start, "end", end, "limit", Math.min(limitOr(limit, config.query.maxMultiShips), config.query.maxMultiShips));
+        ident(ic.shipId),
+        SHIP_ID_HAS_LETTER_PATTERN,
+        SHIP_ID_HAS_LETTER_PATTERN,
+        ident(c.shipId),
+        ident(c.shipName), ident(c.eventTime),
+        ident(c.eventTime),
+        ident(config.tables.track),
+        ident(c.eventTime), sqlDateParam("start"),
+        ident(c.eventTime), sqlDateParam("end"),
+        ident(c.shipId),
+        ident(c.shipId),
+        typeFilter);
+    Map<String, Object> params = params("start", start, "end", end, "limit", limit, "offset", offset);
     putBbox(params, bbox);
     return clickHouse.query(query, params);
+  }
+
+  public Map<String, Object> multiStats(String start, String end, BBox bbox) {
+    Map<String, Object> database = databaseStats();
+    Map<String, Object> window = windowStats(start, end);
+    Map<String, Object> windowBBox = bbox == null ? Map.of("trackPoints", 0L, "ships", 0L) : windowStats(start, end, bbox);
+    return Map.of(
+        "databaseTrackPoints", database.get("trackPoints"),
+        "databaseShips", database.get("ships"),
+        "windowTrackPoints", window.get("trackPoints"),
+        "windowShips", window.get("ships"),
+        "bboxTrackPoints", windowBBox.get("trackPoints"),
+        "bboxShips", windowBBox.get("ships"));
+  }
+
+  private List<String> normalizeShipTypes(List<String> shipTypes) {
+    if (shipTypes == null || shipTypes.isEmpty()) {
+      return List.of("ais");
+    }
+    List<String> normalized = new java.util.ArrayList<>();
+    for (String shipType : shipTypes) {
+      if (shipType == null) {
+        continue;
+      }
+      String value = shipType.trim().toLowerCase();
+      if ("ais".equals(value) || "radar".equals(value)) {
+        if (!normalized.contains(value)) {
+          normalized.add(value);
+        }
+      }
+    }
+    if (normalized.isEmpty()) {
+      normalized.add("ais");
+    }
+    return normalized;
   }
 
   public List<Map<String, Object>> trackRows(List<String> shipIds, String start, String end, int zoom, BBox bbox, String mode) {
     if (shipIds == null || shipIds.isEmpty()) {
       return List.of();
+    }
+    if ("single".equals(mode) && shipIds.size() == 1) {
+      return singleTrackRows(shipIds.get(0), start, end, zoom, bbox);
     }
     ShipTrackConfig.Columns c = config.columns;
     int bucketSeconds = calculateBucketSizeSeconds(zoom, start, end, config.query.maxTrackPointsPerShip, mode);
@@ -313,6 +415,59 @@ public class TrackRepository {
         ident(c.shipId));
     Map<String, Object> params = params("shipIds", shipIds, "start", start, "end", end, "bucketSeconds", bucketSeconds,
         "limit", config.query.maxTrackPointsPerShip * Math.max(1, shipIds.size()));
+    putBbox(params, bbox);
+    return clickHouse.query(query, params);
+  }
+
+  public List<Map<String, Object>> singleTrackRows(String shipId, String start, String end, int zoom, BBox bbox) {
+    if (shipId == null || shipId.isBlank()) {
+      return List.of();
+    }
+    ShipTrackConfig.Columns c = config.columns;
+    int bucketSeconds = calculateBucketSizeSeconds(zoom, start, end, config.query.maxSingleTrackPoints, "single");
+    String bboxFilter = bbox == null ? "" : """
+        AND %s BETWEEN {west: Float64} AND {east: Float64}
+        AND %s BETWEEN {south: Float64} AND {north: Float64}
+        """.formatted(ident(c.longitude), ident(c.latitude));
+    String query = """
+        SELECT
+          {shipId: String} AS shipId,
+          argMin(%s, %s) AS shipName,
+          argMin(%s, %s) AS lng,
+          argMin(%s, %s) AS lat,
+          argMin(%s, %s) AS speed,
+          argMin(%s, %s) AS heading,
+          intDiv(toUnixTimestamp(%s), {bucketSeconds: UInt32}) AS bucket,
+          toString(min(%s)) AS time
+        FROM %s
+        PREWHERE %s = {shipId: String}
+        WHERE %s >= %s
+          AND %s < %s
+          %s
+          AND isFinite(%s) AND isFinite(%s)
+          AND %s BETWEEN -180 AND 180
+          AND %s BETWEEN -90 AND 90
+        GROUP BY bucket
+        ORDER BY time ASC
+        LIMIT {limit: UInt32}
+        """.formatted(
+        ident(c.shipName), ident(c.eventTime),
+        ident(c.longitude), ident(c.eventTime),
+        ident(c.latitude), ident(c.eventTime),
+        ident(c.speed), ident(c.eventTime),
+        ident(c.heading), ident(c.eventTime),
+        ident(c.eventTime),
+        ident(c.eventTime),
+        ident(config.tables.track),
+        ident(c.shipId),
+        ident(c.eventTime), sqlDateParam("start"),
+        ident(c.eventTime), sqlDateParam("end"),
+        bboxFilter,
+        ident(c.longitude), ident(c.latitude),
+        ident(c.longitude),
+        ident(c.latitude));
+    Map<String, Object> params = params("shipId", shipId, "start", start, "end", end, "bucketSeconds", bucketSeconds,
+        "limit", config.query.maxSingleTrackPoints);
     putBbox(params, bbox);
     return clickHouse.query(query, params);
   }

@@ -8,6 +8,28 @@
   trackPoints: [],
   candidates: [],
   selectedShips: [],
+  multi: {
+    bbox: null,
+    drawerVisible: false,
+    candidateLoading: false,
+    candidateQueryElapsedMs: null,
+    candidatePages: [],
+    candidateCurrentPage: 1,
+    candidateBatchPages: 10,
+    selectedShips: [],
+    selectedTrackPoints: 0,
+    stats: {
+      databaseTrackPoints: 0,
+      databaseShips: 0,
+      windowTrackPoints: 0,
+      windowShips: 0,
+      bboxTrackPoints: 0,
+      bboxShips: 0,
+      summaryWindowKey: "",
+      summaryTimer: null,
+      summarySeq: 0
+    }
+  },
   playing: false,
   playIndex: 0,
   speed: 4,
@@ -21,6 +43,7 @@
     viewportShips: 0,
     memoryShips: 0,
     singleTrackPoints: 0,
+    databaseStatsLoaded: false,
     summaryWindowKey: "",
     summaryTimer: null,
     summarySeq: 0
@@ -70,6 +93,9 @@ const REALTIME_DRAW_BATCH = 2500;
 const RADAR_SHIP_ID_PATTERN = /^\d+(?:[-_]\d+)+$/;
 
 const AMAP_TILE_URL = "https://webrd0{sub}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}";
+const STATS_CACHE_TTL_MS = 5 * 60 * 1000;
+const SUMMARY_CACHE_TTL_MS = 30 * 1000;
+const statsRequestCache = new Map();
 
 const $ = (id) => document.getElementById(id);
 
@@ -94,6 +120,34 @@ async function getJson(url) {
     throw new Error(message);
   }
   return response.json();
+}
+
+async function getCachedJson(url, ttlMs = STATS_CACHE_TTL_MS) {
+  const now = Date.now();
+  const cached = statsRequestCache.get(url);
+  if (cached?.value && cached.expiresAt > now) {
+    return cached.value;
+  }
+  if (cached?.promise) {
+    return cached.promise;
+  }
+  const entry = { expiresAt: now + ttlMs, value: null, promise: null };
+  entry.promise = getJson(url)
+    .then((value) => {
+      entry.value = value;
+      entry.expiresAt = Date.now() + ttlMs;
+      entry.promise = null;
+      statsRequestCache.set(url, entry);
+      return value;
+    })
+    .catch((error) => {
+      if (statsRequestCache.get(url) === entry) {
+        statsRequestCache.delete(url);
+      }
+      throw error;
+    });
+  statsRequestCache.set(url, entry);
+  return entry.promise;
 }
 
 async function postJson(url, body) {
@@ -535,6 +589,13 @@ function updateMetrics() {
   $("metric-single-db-points").textContent = metricNumber(state.stats.databaseTrackPoints);
   $("metric-single-db-ships").textContent = metricNumber(state.stats.databaseShips);
   $("metric-single-track-points").textContent = metricNumber(state.stats.singleTrackPoints);
+  $("metric-multi-db-points").textContent = metricNumber(state.multi.stats.databaseTrackPoints);
+  $("metric-multi-db-ships").textContent = metricNumber(state.multi.stats.databaseShips);
+  $("metric-multi-window-points").textContent = metricNumber(state.multi.stats.windowTrackPoints);
+  $("metric-multi-window-ships").textContent = metricNumber(state.multi.stats.windowShips);
+  $("metric-multi-bbox-points").textContent = metricNumber(state.multi.stats.bboxTrackPoints);
+  $("metric-multi-bbox-ships").textContent = metricNumber(state.multi.stats.bboxShips);
+  $("metric-multi-selected-points").textContent = metricNumber(state.multi.selectedTrackPoints);
   $("progress").max = Math.max(0, state.trackPoints.length - 1);
   $("progress").value = state.playIndex;
   $("active-time").textContent = state.trackPoints[state.playIndex]?.time || "--";
@@ -565,11 +626,12 @@ async function refreshRealtimeSummary() {
   if (summaryKey === state.stats.summaryWindowKey) return;
   const seq = ++state.stats.summarySeq;
   const params = qs({ ...windowValue, zoom: getMapZoom(), ...(bbox || {}) });
-  const data = await getJson(`/api/stats/realtime-summary?${params}`);
+  const data = await getCachedJson(`/api/stats/realtime-summary?${params}`, SUMMARY_CACHE_TTL_MS);
   if (seq !== state.stats.summarySeq) return;
   state.stats.summaryWindowKey = summaryKey;
   state.stats.databaseTrackPoints = Number(data.databaseTrackPoints || 0);
   state.stats.databaseShips = Number(data.databaseShips || 0);
+  state.stats.databaseStatsLoaded = true;
   state.stats.windowTrackPoints = Number(data.windowTrackPoints || 0);
   state.stats.windowShips = Number(data.windowShips || 0);
   if (analysisMode) {
@@ -587,14 +649,98 @@ function scheduleRealtimeSummary(delay = 260) {
   }, delay);
 }
 
+async function refreshDatabaseStats() {
+  const data = await getCachedJson("/api/stats/database", STATS_CACHE_TTL_MS);
+  state.stats.databaseTrackPoints = Number(data.databaseTrackPoints ?? data.trackPoints ?? 0);
+  state.stats.databaseShips = Number(data.databaseShips ?? data.ships ?? 0);
+  state.stats.databaseStatsLoaded = true;
+  updateMetrics();
+}
+
+async function refreshMultiSummary() {
+  const start = $("start")?.value;
+  const end = $("end")?.value;
+  if (!start || !end) {
+    state.multi.stats.summaryWindowKey = "";
+    state.multi.stats.databaseTrackPoints = 0;
+    state.multi.stats.databaseShips = 0;
+    state.multi.stats.windowTrackPoints = 0;
+    state.multi.stats.windowShips = 0;
+    state.multi.stats.bboxTrackPoints = 0;
+    state.multi.stats.bboxShips = 0;
+    updateMetrics();
+    return;
+  }
+  const bbox = state.multi.bbox;
+  const summaryKey = JSON.stringify({ start, end, bbox });
+  if (summaryKey === state.multi.stats.summaryWindowKey) return;
+  const seq = ++state.multi.stats.summarySeq;
+  const params = qs({
+    start: toIso(start),
+    end: toIso(end),
+    ...(bbox || {})
+  });
+  const data = await getCachedJson(`/api/stats/multi-summary?${params}`, SUMMARY_CACHE_TTL_MS);
+  if (seq !== state.multi.stats.summarySeq) return;
+  state.multi.stats.summaryWindowKey = summaryKey;
+  state.multi.stats.databaseTrackPoints = Number(data.databaseTrackPoints || 0);
+  state.multi.stats.databaseShips = Number(data.databaseShips || 0);
+  state.multi.stats.windowTrackPoints = Number(data.windowTrackPoints || 0);
+  state.multi.stats.windowShips = Number(data.windowShips || 0);
+  state.multi.stats.bboxTrackPoints = Number(data.bboxTrackPoints || 0);
+  state.multi.stats.bboxShips = Number(data.bboxShips || 0);
+  updateMetrics();
+}
+
+function scheduleMultiSummary(delay = 260) {
+  if (state.multi.stats.summaryTimer) clearTimeout(state.multi.stats.summaryTimer);
+  state.multi.stats.summaryTimer = setTimeout(() => {
+    state.multi.stats.summaryTimer = null;
+    refreshMultiSummary().catch((error) => setStatus("多船统计刷新失败: " + error.message));
+  }, delay);
+}
+
+function resetTrackPlaybackState() {
+  state.playing = false;
+  state.playIndex = 0;
+  state.trackPoints = [];
+  state.stats.singleTrackPoints = 0;
+  state.multi.selectedTrackPoints = 0;
+  syncPlayButtons();
+  $("progress").value = 0;
+  $("active-time").textContent = "--";
+}
+
+function syncPlayButtons() {
+  const playing = state.playing;
+  const mainPlay = $("play");
+  if (mainPlay) {
+    mainPlay.textContent = playing ? "⏸" : "▶";
+    mainPlay.classList.toggle("hidden", state.mode === "multi");
+  }
+  const candidatePlay = $("candidate-play");
+  if (candidatePlay) {
+    candidatePlay.textContent = playing ? "暂停" : "播放";
+  }
+}
+
+function togglePlayback() {
+  state.playing = !state.playing;
+  syncPlayButtons();
+}
+
 function switchMode(mode) {
   const previousMode = state.mode;
   state.mode = mode;
+  if (previousMode !== mode) {
+    resetTrackPlaybackState();
+  }
   document.querySelectorAll(".nav").forEach((button) => button.classList.toggle("active", button.dataset.mode === mode));
   document.querySelectorAll(".mode-panel").forEach((panel) => panel.classList.add("hidden"));
   $("realtime-stats-section")?.classList.toggle("hidden", mode !== "realtime");
   $("analysis-stats-section")?.classList.toggle("hidden", mode !== "analysis");
   $("single-stats-section")?.classList.toggle("hidden", mode !== "single");
+  $("multi-stats-section")?.classList.toggle("hidden", mode !== "multi");
   $(`${mode}-panel`)?.classList.remove("hidden");
   $("time-section").classList.toggle("hidden", !["multi", "global"].includes(mode));
   $("player").classList.toggle("hidden", !["single", "multi", "global"].includes(mode));
@@ -609,7 +755,10 @@ function switchMode(mode) {
   if (mode === "realtime") renderRealtime();
   if (mode === "analysis") renderHeat();
   if (["single", "multi", "global"].includes(mode)) renderTracks();
-  if (mode !== "single") {
+  renderCandidateDrawer();
+  if (mode === "multi") {
+    scheduleMultiSummary(previousMode === mode ? 0 : 120);
+  } else if (mode !== "single") {
     scheduleRealtimeSummary(previousMode === mode ? 0 : 120);
   }
 }
@@ -1175,20 +1324,11 @@ async function loadSingleTrack() {
     return;
   }
   const params = qs({ shipId: $("ship-id").value.trim(), ...windowValue, zoom: getMapZoom() });
-  const [trackResult, statsResult] = await Promise.allSettled([
-    getJson(`/api/tracks/single?${params}`),
-    getJson("/api/stats/database")
-  ]);
-  if (trackResult.status !== "fulfilled") {
-    throw trackResult.reason;
-  }
-  const data = trackResult.value;
+  const data = await getJson(`/api/tracks/single?${params}`);
   state.trackPoints = data.items;
   state.playIndex = 0;
-  if (statsResult.status === "fulfilled") {
-    const stats = statsResult.value;
-    state.stats.databaseTrackPoints = Number(stats.databaseTrackPoints ?? stats.trackPoints ?? 0);
-    state.stats.databaseShips = Number(stats.databaseShips ?? stats.ships ?? 0);
+  if (!state.stats.databaseStatsLoaded) {
+    refreshDatabaseStats().catch(() => {});
   }
   state.stats.singleTrackPoints = state.trackPoints.length;
   renderTracks();
@@ -1196,34 +1336,254 @@ async function loadSingleTrack() {
   setStatus(`单船轨迹 ${state.stats.singleTrackPoints.toLocaleString()} 个抽稀点`);
 }
 
-async function loadCandidates(bbox = currentDataBBox()) {
-  setStatus("正在查询候选船舶");
-  const params = qs({ start: toIso($("start").value), end: toIso($("end").value), ...bbox, limit: state.config.maxMultiShips });
-  const data = await getJson(`/api/tracks/candidates?${params}`);
-  state.candidates = data.items;
-  state.selectedShips = state.candidates.slice(0, 5).map((item) => item.shipId);
-  renderCandidateList();
-  setStatus(`候选船舶 ${state.candidates.length} 艘，默认选中前 5 艘`);
+function exitSingleTrack() {
+  resetTrackPlaybackState();
+  switchMode("realtime");
+  updateMetrics();
+  setStatus("已退出单船轨迹，回到实时位置展示");
 }
 
-function renderCandidateList() {
-  const list = $("ship-list");
+function multiTimeWindowParams() {
+  const start = $("start")?.value;
+  const end = $("end")?.value;
+  if (!start || !end) return null;
+  return { start: toIso(start), end: toIso(end) };
+}
+
+function selectedCandidateTypes() {
+  const types = [];
+  if ($("candidate-type-ais")?.checked) types.push("ais");
+  if ($("candidate-type-radar")?.checked) types.push("radar");
+  return types;
+}
+
+function multiQueryBBox() {
+  return state.multi.bbox || currentDataBBox();
+}
+
+function resetMultiCandidates({ preserveDrawer = false } = {}) {
+  state.multi.candidatePages = [];
+  state.multi.candidateCurrentPage = 1;
+  if (!preserveDrawer) {
+    state.multi.drawerVisible = false;
+  }
+  state.multi.selectedShips = [];
+  state.multi.selectedTrackPoints = 0;
+  state.multi.candidateQueryElapsedMs = null;
+}
+
+function candidatePageItems(page = state.multi.candidateCurrentPage) {
+  return state.multi.candidatePages.find((item) => item.page === page)?.items || [];
+}
+
+function loadedCandidateItems() {
+  return state.multi.candidatePages.flatMap((page) => page.items);
+}
+
+function multiSelectionShipIds(shipIds) {
+  const selected = new Set(state.multi.selectedShips);
+  for (const shipId of shipIds) {
+    if (!shipId) continue;
+    selected.add(shipId);
+    if (selected.size >= state.config.maxMultiShips) break;
+  }
+  const ordered = loadedCandidateItems()
+    .map((item) => item.shipId)
+    .filter((shipId) => selected.has(shipId))
+    .slice(0, state.config.maxMultiShips);
+  state.multi.selectedShips = ordered;
+  return ordered.length >= state.config.maxMultiShips && selected.size > ordered.length;
+}
+
+function multiSelectionFromPage(page) {
+  return candidatePageItems(page).map((item) => item.shipId);
+}
+
+function sortCandidateItems(items) {
+  return [...(items || [])].sort((left, right) => {
+    const typeRank = Number(right.isAis || 0) - Number(left.isAis || 0);
+    if (typeRank !== 0) return typeRank;
+    const pointsRank = Number(right.points || 0) - Number(left.points || 0);
+    if (pointsRank !== 0) return pointsRank;
+    return String(left.shipId || "").localeCompare(String(right.shipId || ""));
+  });
+}
+
+function renderCandidateDrawer() {
+  const drawer = $("candidate-drawer");
+  const expandButton = $("candidate-expand");
+  if (!drawer) return;
+  const hasCandidates = state.multi.candidatePages.length > 0;
+  const visible = state.mode === "multi" && state.multi.drawerVisible;
+  drawer.classList.toggle("hidden", !visible);
+  if (expandButton) {
+    expandButton.classList.toggle("hidden", !(state.mode === "multi" && hasCandidates && !visible));
+  }
+  if (!visible) return;
+
+  const currentPage = Math.max(1, state.multi.candidateCurrentPage);
+  const pages = state.multi.candidatePages;
+  const pageCount = pages.length;
+  const currentItems = candidatePageItems(currentPage);
+  $("candidate-loaded-pages").textContent = String(pageCount);
+  $("candidate-page-size").textContent = String(CANDIDATE_PAGE_SIZE);
+  $("candidate-total-pages").textContent = String(pageCount);
+  $("candidate-current-page").textContent = String(currentPage);
+  $("candidate-total-loaded").textContent = String(loadedCandidateItems().length);
+  $("candidate-selected-count").textContent = String(state.multi.selectedShips.length);
+  $("candidate-query-elapsed").textContent = state.multi.candidateQueryElapsedMs == null ? "--" : `${state.multi.candidateQueryElapsedMs} ms`;
+  $("candidate-prev-page").disabled = currentPage <= 1;
+  $("candidate-next-page").disabled = currentPage >= pageCount;
+  $("candidate-more-pages").disabled = state.multi.candidateLoading;
+  $("candidate-select-page").disabled = !currentItems.length;
+  $("candidate-select-loaded").disabled = !loadedCandidateItems().length;
+
+  const list = $("candidate-list");
+  if (!list) return;
   list.innerHTML = "";
-  state.candidates.forEach((ship) => {
+  if (!currentItems.length) {
+    const empty = document.createElement("div");
+    empty.className = "candidate-empty";
+    empty.textContent = pageCount ? "当前页没有候选船舶" : "请先框选范围，候选船舶会自动加载在这里";
+    list.append(empty);
+    return;
+  }
+  currentItems.forEach((ship) => {
     const row = document.createElement("label");
-    row.className = "check-row";
+    row.className = "candidate-row";
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
-    checkbox.checked = state.selectedShips.includes(ship.shipId);
+    checkbox.checked = state.multi.selectedShips.includes(ship.shipId);
     checkbox.onchange = () => {
-      if (checkbox.checked) state.selectedShips = [...state.selectedShips, ship.shipId].slice(0, state.config.maxMultiShips);
-      else state.selectedShips = state.selectedShips.filter((id) => id !== ship.shipId);
+      if (checkbox.checked) {
+        const trimmed = multiSelectionShipIds([ship.shipId]);
+        if (trimmed) setStatus("已选中船舶达到上限，超出部分未纳入播放");
+      } else {
+        state.multi.selectedShips = state.multi.selectedShips.filter((id) => id !== ship.shipId);
+      }
+      state.multi.selectedTrackPoints = 0;
+      renderCandidateDrawer();
     };
-    const text = document.createElement("span");
-    text.textContent = ship.shipId;
+    const text = document.createElement("div");
+    text.className = "candidate-text";
+    const title = document.createElement("strong");
+    title.textContent = ship.shipName ? `${ship.shipName} / ${ship.shipId}` : String(ship.shipId || "");
+    const meta = document.createElement("span");
+    meta.textContent = `${ship.shipType === "ais" ? "AIS" : "雷达"} · ${Number(ship.points || 0).toLocaleString()} 条`;
+    row.title = `${ship.shipName ? `${ship.shipName} / ` : ""}${ship.shipId || ""} · ${ship.shipType === "ais" ? "AIS" : "雷达"} · ${Number(ship.points || 0).toLocaleString()} 条 · ${ship.firstTime || "--"} ~ ${ship.lastTime || "--"}`;
+    text.append(title, meta);
     row.append(checkbox, text);
     list.append(row);
   });
+}
+
+const CANDIDATE_PAGE_SIZE = 100;
+
+async function loadCandidatePage(page, shipTypes, bbox) {
+  const windowValue = multiTimeWindowParams();
+  if (!windowValue) {
+    throw new Error("多船时间范围无效");
+  }
+  const params = qs({
+    ...windowValue,
+    ...bbox,
+    page,
+    pageSize: CANDIDATE_PAGE_SIZE,
+    shipTypes: shipTypes.join(",")
+  });
+  const data = await getJson(`/api/tracks/candidates?${params}`);
+  return { page, items: sortCandidateItems(data.items || []) };
+}
+
+async function loadCandidates({ append = false } = {}) {
+  switchMode("multi");
+  if (state.multi.candidateLoading) {
+    return;
+  }
+  const startedAt = performance.now();
+  const bbox = multiQueryBBox();
+  const windowValue = multiTimeWindowParams();
+  const shipTypes = selectedCandidateTypes();
+  if (!windowValue) {
+    showError("多船时间范围无效");
+    setStatus("多船时间范围无效");
+    return;
+  }
+  if (!bbox) {
+    showError("请先框选船舶范围");
+    setStatus("请先框选船舶范围");
+    return;
+  }
+  state.multi.bbox = bbox;
+  if (!shipTypes.length) {
+    showError("请至少选择一种船舶类型");
+    setStatus("请至少选择一种船舶类型");
+    return;
+  }
+  state.multi.candidateLoading = true;
+  renderCandidateDrawer();
+  const startPage = append ? state.multi.candidatePages.length + 1 : 1;
+  const pageCount = state.multi.candidateBatchPages;
+  setStatus(append ? `正在继续加载候选船舶第 ${startPage} 页` : "正在查询候选船舶");
+  try {
+    const nextPages = append
+      ? state.multi.candidatePages.map((item) => ({ page: item.page, items: item.items.slice() }))
+      : [];
+    const requests = [];
+    for (let page = startPage; page < startPage + pageCount; page += 1) {
+      requests.push(loadCandidatePage(page, shipTypes, bbox));
+    }
+    const results = await Promise.all(requests);
+    for (const result of results) {
+      const existingIndex = nextPages.findIndex((item) => item.page === result.page);
+      if (existingIndex >= 0) {
+        nextPages[existingIndex] = result;
+      } else {
+        nextPages.push(result);
+      }
+    }
+    nextPages.sort((left, right) => left.page - right.page);
+    state.multi.candidatePages = nextPages;
+    state.multi.selectedShips = append ? state.multi.selectedShips.filter((id) => loadedCandidateItems().some((item) => item.shipId === id)) : [];
+    state.multi.drawerVisible = true;
+    state.multi.candidateCurrentPage = append ? Math.min(state.multi.candidateCurrentPage, state.multi.candidatePages.length) : 1;
+    state.multi.candidateQueryElapsedMs = Math.max(0, Math.round(performance.now() - startedAt));
+    renderCandidateDrawer();
+    scheduleMultiSummary(0);
+    setStatus(`候选船舶已加载 ${state.multi.candidatePages.length} 页，当前共 ${loadedCandidateItems().length.toLocaleString()} 艘，查询耗时 ${state.multi.candidateQueryElapsedMs} ms`);
+  } catch (error) {
+    state.multi.candidateQueryElapsedMs = Math.max(0, Math.round(performance.now() - startedAt));
+    renderCandidateDrawer();
+    throw error;
+  } finally {
+    state.multi.candidateLoading = false;
+    renderCandidateDrawer();
+  }
+}
+
+function selectCandidatePage(page) {
+  const ids = multiSelectionFromPage(page);
+  if (!ids.length) return;
+  const trimmed = multiSelectionShipIds(ids);
+  state.multi.selectedTrackPoints = 0;
+  renderCandidateDrawer();
+  if (trimmed) setStatus("已选中船舶达到上限，超出部分未纳入播放");
+}
+
+function selectLoadedCandidatePages() {
+  const ids = loadedCandidateItems().map((item) => item.shipId);
+  if (!ids.length) return;
+  const trimmed = multiSelectionShipIds(ids);
+  state.multi.selectedTrackPoints = 0;
+  renderCandidateDrawer();
+  if (trimmed) setStatus("已选中船舶达到上限，超出部分未纳入播放");
+}
+
+function gotoCandidatePage(delta) {
+  const nextPage = Math.min(Math.max(1, state.multi.candidateCurrentPage + delta), Math.max(1, state.multi.candidatePages.length));
+  if (nextPage === state.multi.candidateCurrentPage) return;
+  state.multi.candidateCurrentPage = nextPage;
+  renderCandidateDrawer();
 }
 
 function drawBox() {
@@ -1234,7 +1594,7 @@ function drawBox() {
     state.layers.drawBoxInteraction = null;
   }
   const dragBox = new ol.interaction.DragBox({ condition: ol.events.condition.always });
-  dragBox.on("boxend", async () => {
+  dragBox.on("boxend", () => {
     const extent = dragBox.getGeometry().getExtent();
     state.layers.rectangleSource?.clear();
     const rectangle = new ol.Feature({ geometry: ol.geom.Polygon.fromExtent(extent) });
@@ -1243,7 +1603,12 @@ function drawBox() {
     state.layers.drawBoxInteraction = null;
     const sw = ol.proj.toLonLat([extent[0], extent[1]]);
     const ne = ol.proj.toLonLat([extent[2], extent[3]]);
-    await loadCandidates(toQueryBBoxFromLngLat(sw, ne));
+    state.multi.bbox = toQueryBBoxFromLngLat(sw, ne);
+    resetMultiCandidates();
+    renderCandidateDrawer();
+    scheduleMultiSummary(0);
+    setStatus("框选完成，正在加载候选船舶");
+    loadCandidates().catch((error) => showError(error.message));
   });
   state.layers.drawBoxInteraction = dragBox;
   state.map.addInteraction(dragBox);
@@ -1251,19 +1616,47 @@ function drawBox() {
 
 async function loadMultiTrack() {
   switchMode("multi");
+  const shipIds = state.multi.selectedShips.slice(0, state.config.maxMultiShips);
+  if (!shipIds.length) {
+    showError("请先选择候选船舶");
+    setStatus("请先选择候选船舶");
+    return;
+  }
   setStatus("正在查询多船轨迹");
+  const bbox = state.multi.bbox || currentDataBBox();
+  const windowValue = multiTimeWindowParams();
+  if (!windowValue) {
+    showError("多船时间范围无效");
+    setStatus("多船时间范围无效");
+    return;
+  }
   const data = await postJson("/api/tracks/multi", {
-    shipIds: state.selectedShips,
-    start: toIso($("start").value),
-    end: toIso($("end").value),
+    shipIds,
+    start: windowValue.start,
+    end: windowValue.end,
     zoom: getMapZoom(),
-    bbox: currentDataBBox()
+    bbox
   });
   state.trackPoints = data.items;
   state.playIndex = 0;
+  state.multi.selectedTrackPoints = state.trackPoints.length;
   renderTracks();
   updateMetrics();
   setStatus(`多船轨迹 ${state.trackPoints.length.toLocaleString()} 个抽稀点`);
+}
+
+async function playSelectedMultiTracks() {
+  switchMode("multi");
+  if (!state.multi.selectedShips.length) {
+    showError("请先选择候选船舶");
+    setStatus("请先选择候选船舶");
+    return;
+  }
+  if (!state.trackPoints.length || state.multi.selectedTrackPoints === 0) {
+    await loadMultiTrack();
+  }
+  state.playing = true;
+  syncPlayButtons();
 }
 
 async function loadGlobalSegment() {
@@ -1287,7 +1680,7 @@ function tickPlayer() {
     renderPlaybackMarkers();
     if (state.playIndex >= state.trackPoints.length - 1) {
       state.playing = false;
-      $("play").textContent = "▶";
+      syncPlayButtons();
     }
   }
   setTimeout(tickPlayer, 400);
@@ -1405,12 +1798,21 @@ function bindEvents() {
     scheduleRealtimeSummary(0);
   };
   $("start").onchange = () => {
-    scheduleRealtimeSummary(0);
+    if (state.mode === "multi") {
+      scheduleMultiSummary(0);
+    } else {
+      scheduleRealtimeSummary(0);
+    }
   };
   $("end").onchange = () => {
-    scheduleRealtimeSummary(0);
+    if (state.mode === "multi") {
+      scheduleMultiSummary(0);
+    } else {
+      scheduleRealtimeSummary(0);
+    }
   };
   $("load-single").onclick = () => loadSingleTrack().catch((error) => showError(error.message));
+  $("exit-single-track").onclick = () => exitSingleTrack();
   $("single-point").onchange = () => {
     if (state.mode === "single") {
       loadSingleTrack().catch((error) => showError(error.message));
@@ -1427,8 +1829,38 @@ function bindEvents() {
     }
   };
   $("draw-box").onclick = drawBox;
-  $("load-candidates").onclick = () => loadCandidates().catch((error) => showError(error.message));
-  $("load-multi").onclick = () => loadMultiTrack().catch((error) => showError(error.message));
+  $("candidate-type-ais").onchange = () => {
+    if (state.mode === "multi") {
+      loadCandidates().catch((error) => showError(error.message));
+    }
+  };
+  $("candidate-type-radar").onchange = () => {
+    if (state.mode === "multi") {
+      loadCandidates().catch((error) => showError(error.message));
+    }
+  };
+  $("candidate-prev-page").onclick = () => {
+    if (state.mode === "multi") gotoCandidatePage(-1);
+  };
+  $("candidate-next-page").onclick = () => {
+    if (state.mode === "multi") gotoCandidatePage(1);
+  };
+  $("candidate-more-pages").onclick = () => loadCandidates({ append: true }).catch((error) => showError(error.message));
+  $("candidate-select-page").onclick = () => {
+    if (state.mode === "multi") selectCandidatePage(state.multi.candidateCurrentPage);
+  };
+  $("candidate-select-loaded").onclick = () => {
+    if (state.mode === "multi") selectLoadedCandidatePages();
+  };
+  $("candidate-play").onclick = () => playSelectedMultiTracks().catch((error) => showError(error.message));
+  $("candidate-close").onclick = () => {
+    state.multi.drawerVisible = false;
+    renderCandidateDrawer();
+  };
+  $("candidate-expand").onclick = () => {
+    state.multi.drawerVisible = true;
+    renderCandidateDrawer();
+  };
   $("load-global").onclick = () => loadGlobalSegment().catch((error) => showError(error.message));
   $("clear-global").onclick = () => {
     state.trackPoints = [];
@@ -1436,14 +1868,11 @@ function bindEvents() {
     renderTracks();
     updateMetrics();
   };
-  $("play").onclick = () => {
-    state.playing = !state.playing;
-    $("play").textContent = state.playing ? "暂停" : "播放";
-  };
+  $("play").onclick = togglePlayback;
   $("stop").onclick = () => {
     state.playing = false;
     state.playIndex = 0;
-    $("play").textContent = "▶";
+    syncPlayButtons();
     renderPlaybackMarkers();
   };
   $("speed").onchange = () => {
