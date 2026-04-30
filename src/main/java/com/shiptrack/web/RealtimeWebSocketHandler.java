@@ -3,7 +3,6 @@ package com.shiptrack.web;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.shiptrack.realtime.RealtimeService;
 import org.springframework.stereotype.Component;
-import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
@@ -20,18 +19,6 @@ public class RealtimeWebSocketHandler extends TextWebSocketHandler {
 
   @Override
   public void afterConnectionEstablished(WebSocketSession session) throws Exception {
-    realtimeService.register(session);
     session.sendMessage(new TextMessage(objectMapper.writeValueAsString(realtimeService.readyPayload())));
-    realtimeService.pollRealtimeDeltas();
-  }
-
-  @Override
-  public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
-    realtimeService.unregister(session);
-  }
-
-  @Override
-  public void handleTransportError(WebSocketSession session, Throwable exception) {
-    realtimeService.unregister(session);
   }
 }

@@ -28,15 +28,16 @@
   "query": {
     "latestLookbackHours": 5,
     "realtimeWindowMinutes": 10,
-    "realtimePollSeconds": 5,
     "clickhouseTimeoutSeconds": 30,
+    "logSql": true,
     "latestPageSize": 30000,
     "maxLatestShips": 300000,
     "maxRealtimeDeltaShips": 10000,
     "maxDensityCells": 30000,
     "maxTrackPointsPerShip": 3000,
     "maxSingleTrackPoints": 1200,
-    "maxMultiShips": 100,
+    "maxMultiShips": 1000,
+    "maxCandidateBatchSize": 1000,
     "maxGlobalSegmentPoints": 50000,
     "globalSegmentHours": 1
   },

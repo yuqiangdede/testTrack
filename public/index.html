@@ -25,6 +25,8 @@
           <h1>船舶态势与轨迹回放</h1>
           <div id="status" class="status">准备加载地图</div>
         </header>
+        <button id="api-trace-toggle" class="api-trace-toggle hidden" type="button">接口耗时</button>
+        <div id="api-trace" class="api-trace hidden" aria-live="polite"></div>
         <section class="content">
           <div class="map-wrap">
             <div id="map" class="map"></div>
@@ -40,7 +42,7 @@
                 <div class="candidate-header-actions">
                   <label class="candidate-toggle"><input id="candidate-type-ais" type="checkbox" checked /> AIS</label>
                   <label class="candidate-toggle"><input id="candidate-type-radar" type="checkbox" /> 雷达</label>
-                  <button id="candidate-play" class="candidate-play primary" type="button">播放</button>
+                  <button id="candidate-load-track" class="candidate-play primary" type="button">加载轨迹</button>
                   <button id="candidate-close" class="candidate-close" type="button">收起</button>
                 </div>
               </div>
@@ -85,7 +87,8 @@
               <div class="metric-grid">
                 <div class="metric"><span>数据库轨迹点总量</span><strong id="metric-single-db-points">0</strong></div>
                 <div class="metric"><span>数据库船舶总量</span><strong id="metric-single-db-ships">0</strong></div>
-                <div class="metric"><span>当前船轨迹点数量</span><strong id="metric-single-track-points">0</strong></div>
+                <div class="metric"><span>当前船原始轨迹点数量</span><strong id="metric-single-track-points">0</strong></div>
+                <div class="metric"><span>抽稀后点数量</span><strong id="metric-single-sampled-points">0</strong></div>
               </div>
             </section>
             <section id="multi-stats-section" class="panel-section hidden">
@@ -97,7 +100,17 @@
                 <div class="metric"><span>当前时间窗船舶总量</span><strong id="metric-multi-window-ships">0</strong></div>
                 <div class="metric"><span>时间窗 + 框选轨迹点总量</span><strong id="metric-multi-bbox-points">0</strong></div>
                 <div class="metric"><span>时间窗 + 框选船舶总量</span><strong id="metric-multi-bbox-ships">0</strong></div>
-                <div class="metric"><span>人工选中船舶的轨迹点数量</span><strong id="metric-multi-selected-points">0</strong></div>
+                <div class="metric"><span>选中船舶原始轨迹点数量</span><strong id="metric-multi-selected-points">0</strong></div>
+                <div class="metric"><span>抽稀后点数量</span><strong id="metric-multi-sampled-points">0</strong></div>
+              </div>
+            </section>
+            <section id="global-stats-section" class="panel-section hidden">
+              <h2>全域轨迹统计</h2>
+              <div class="metric-grid">
+                <div class="metric"><span>数据库轨迹点总量</span><strong id="metric-global-db-points">0</strong></div>
+                <div class="metric"><span>数据库船舶总量</span><strong id="metric-global-db-ships">0</strong></div>
+                <div class="metric"><span>选择时间内的轨迹点总量</span><strong id="metric-global-window-points">0</strong></div>
+                <div class="metric"><span>抽稀后点数量</span><strong id="metric-global-sampled-points">0</strong></div>
               </div>
             </section>
             <section id="time-section" class="panel-section hidden">
@@ -144,33 +157,51 @@
               <p>默认按实时位置带入的时间点，向前 12 小时、向后 0 小时回放，可按需要修改。</p>
               <div class="button-row">
                 <button id="load-single" class="primary">查询单船轨迹</button>
-                <button id="exit-single-track" type="button">退出单船轨迹</button>
               </div>
             </section>
             <section id="multi-panel" class="panel-section mode-panel hidden">
               <div class="actions multi-actions">
                 <button id="draw-box">框选</button>
+                <button id="clear-box" type="button">清空</button>
               </div>
             </section>
             <section id="global-panel" class="panel-section mode-panel hidden">
-              <h3>小时片段</h3>
-              <label>片段开始<input id="segment-start" type="datetime-local" value="2026-04-17T09:00" /></label>
-              <button id="load-global" class="primary">加载当前视野 1 小时</button>
-              <button id="clear-global">清空全域轨迹</button>
+              <h3>全域回放</h3>
+              <div class="time-grid">
+                <label>时间点<input id="global-point" type="datetime-local" step="1" /></label>
+                <label>向前小时<input id="global-hours" type="number" min="1" step="1" value="1" /></label>
+              </div>
+              <button id="load-global" class="primary">加载全域轨迹</button>
             </section>
             <section id="player" class="panel-section player hidden">
               <h3>播放控制</h3>
               <div class="button-row">
                 <button id="play" class="round primary">▶</button>
-                <button id="stop" class="round">■</button>
                 <select id="speed">
                   <option value="1">1x</option>
+                  <option value="2">2x</option>
                   <option value="4" selected>4x</option>
                   <option value="8">8x</option>
                   <option value="16">16x</option>
                   <option value="64">64x</option>
-                  <option value="256">256x</option>
+                  <option value="128">128x</option>
                 </select>
+                <button id="exit-playback" type="button">退出回放</button>
+              </div>
+              <div class="sampling-grid">
+                <label>采样模式
+                  <select id="track-sampling-mode">
+                    <option value="auto" selected>自动抽稀</option>
+                    <option value="raw">原始</option>
+                    <option value="manual">人工指定桶秒数</option>
+                  </select>
+                </label>
+                <div id="track-sampling-bucket-group" class="hidden">
+                  <label>桶秒数
+                    <input id="track-sampling-bucket" type="number" min="1" step="1" value="60" />
+                  </label>
+                  <p id="track-sampling-hint" class="sampling-hint">仅人工指定桶秒数时生效。</p>
+                </div>
               </div>
               <input id="progress" type="range" min="0" max="0" value="0" />
               <p>时间：<span id="active-time">--</span></p>

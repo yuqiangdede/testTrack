@@ -1,13 +1,9 @@
 package com.shiptrack.realtime;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.shiptrack.config.ShipConfigService;
 import com.shiptrack.config.ShipTrackConfig;
 import com.shiptrack.model.TimeWindow;
 import com.shiptrack.track.TrackRepository;
-import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
-import java.io.IOException;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -17,18 +13,11 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
-import org.springframework.web.socket.TextMessage;
-import org.springframework.web.socket.WebSocketSession;
 
 @Service
 public class RealtimeService {
@@ -38,10 +27,7 @@ public class RealtimeService {
 
   private final TrackRepository repository;
   private final ShipTrackConfig config;
-  private final ObjectMapper objectMapper;
-  private final Set<WebSocketSession> clients = ConcurrentHashMap.newKeySet();
   private final Object lock = new Object();
-  private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
 
   private Map<String, Object> databaseStats = Map.of("trackPoints", 0L, "ships", 0L);
   private boolean ready;
@@ -52,23 +38,10 @@ public class RealtimeService {
   private List<Map<String, Object>> items = List.of();
   private List<List<Object>> rows = List.of();
   private String watermark = "";
-  private boolean polling;
 
-  public RealtimeService(TrackRepository repository, ShipConfigService configService, ObjectMapper objectMapper) {
+  public RealtimeService(TrackRepository repository, ShipConfigService configService) {
     this.repository = repository;
     this.config = configService.config();
-    this.objectMapper = objectMapper;
-  }
-
-  @PostConstruct
-  void startPollLoop() {
-    long intervalMs = Math.max(1, config.query.realtimePollSeconds) * 1000L;
-    scheduler.scheduleWithFixedDelay(this::safePollRealtimeDeltas, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
-  }
-
-  @PreDestroy
-  void stopPollLoop() {
-    scheduler.shutdownNow();
   }
 
   @EventListener(ApplicationReadyEvent.class)
@@ -98,6 +71,13 @@ public class RealtimeService {
     }
     LocalDateTime endDate = parseClickHouseLocal(latest);
     LocalDateTime startDate = endDate.minusMinutes(Math.max(1, config.query.realtimeWindowMinutes));
+    return new TimeWindow(startDate.format(LOCAL_FORMAT), endDate.format(LOCAL_FORMAT));
+  }
+
+  public TimeWindow globalWindowFromParams(String timePoint, String hours) {
+    LocalDateTime endDate = parseRealtimeAnchor(timePoint);
+    int lookbackHours = resolveGlobalHours(hours);
+    LocalDateTime startDate = endDate.minusHours(lookbackHours);
     return new TimeWindow(startDate.format(LOCAL_FORMAT), endDate.format(LOCAL_FORMAT));
   }
 
@@ -191,14 +171,6 @@ public class RealtimeService {
     }
   }
 
-  public void register(WebSocketSession session) {
-    clients.add(session);
-  }
-
-  public void unregister(WebSocketSession session) {
-    clients.remove(session);
-  }
-
   public Map<String, Object> readyPayload() {
     synchronized (lock) {
       return Map.of(
@@ -207,35 +179,6 @@ public class RealtimeService {
           "cacheReady", ready,
           "window", window,
           "since", watermark);
-    }
-  }
-
-  public void pollRealtimeDeltas() {
-    TimeWindow currentWindow;
-    String since;
-    synchronized (lock) {
-      if (polling || !ready || watermark.isBlank() || clients.isEmpty()) {
-        return;
-      }
-      polling = true;
-      currentWindow = window;
-      since = watermark;
-    }
-    try {
-      List<Map<String, Object>> deltas = repository.deltas(since, currentWindow.end());
-      if (deltas.isEmpty()) {
-        return;
-      }
-      synchronized (lock) {
-        upsertLatestCache(deltas);
-      }
-      broadcast(Map.of("type", "delta", "since", since, "window", currentWindow, "items", deltas));
-    } catch (RuntimeException error) {
-      broadcast(Map.of("type", "error", "message", error.getMessage() == null ? String.valueOf(error) : error.getMessage()));
-    } finally {
-      synchronized (lock) {
-        polling = false;
-      }
     }
   }
 
@@ -282,12 +225,12 @@ public class RealtimeService {
     return minutes;
   }
 
-  private void safePollRealtimeDeltas() {
-    try {
-      pollRealtimeDeltas();
-    } catch (RuntimeException error) {
-      log.warn("realtime poll failed: {}", error.getMessage(), error);
+  private int resolveGlobalHours(String value) {
+    int hours = value == null || value.isBlank() ? config.query.globalSegmentHours : Integer.parseInt(value);
+    if (hours < 1) {
+      throw new IllegalArgumentException("global replay hours is invalid");
     }
+    return hours;
   }
 
   private void upsertLatestCache(List<Map<String, Object>> nextItems) {
@@ -340,29 +283,6 @@ public class RealtimeService {
     body.put("nextCursor", "");
     body.put("hasMore", false);
     return body;
-  }
-
-  private void broadcast(Map<String, Object> payload) {
-    String text;
-    try {
-      text = objectMapper.writeValueAsString(payload);
-    } catch (IOException error) {
-      return;
-    }
-    TextMessage message = new TextMessage(text);
-    List<WebSocketSession> closed = new ArrayList<>();
-    for (WebSocketSession client : clients) {
-      try {
-        if (client.isOpen()) {
-          client.sendMessage(message);
-        } else {
-          closed.add(client);
-        }
-      } catch (IOException error) {
-        closed.add(client);
-      }
-    }
-    clients.removeAll(closed);
   }
 
   private boolean sameWindow(TimeWindow a, TimeWindow b) {

@@ -22,6 +22,7 @@ public class ShipConfigService {
     config.clickhouse.jdbcUrl = envOrDefault("CLICKHOUSE_JDBC_URL", config.clickhouse.jdbcUrl);
     config.clickhouse.username = envOrDefault("CLICKHOUSE_USER", config.clickhouse.username);
     config.clickhouse.password = envOrDefault("CLICKHOUSE_PASSWORD", config.clickhouse.password);
+    config.query.logSql = envBooleanOrDefault("SHIP_QUERY_LOG_SQL", config.query.logSql);
   }
 
   public Path root() {
@@ -38,6 +39,11 @@ public class ShipConfigService {
       value = dotEnv.get(key);
     }
     return value == null || value.isBlank() ? defaultValue : value;
+  }
+
+  public boolean envBooleanOrDefault(String key, boolean defaultValue) {
+    String value = envOrDefault(key, String.valueOf(defaultValue));
+    return Boolean.parseBoolean(value);
   }
 
   private Map<String, String> loadDotEnv(Path path) throws IOException {

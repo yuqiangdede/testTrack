@@ -49,6 +49,7 @@ public class ApiController {
       body.put("defaultCenter", config.map.defaultCenter);
       body.put("defaultZoom", config.map.defaultZoom);
       body.put("maxMultiShips", config.query.maxMultiShips);
+      body.put("globalSegmentHours", config.query.globalSegmentHours);
       body.put("amapKey", configService.envOrDefault("VITE_AMAP_KEY", ""));
       body.put("amapSecurityJsCode", configService.envOrDefault("VITE_AMAP_SECURITY_JS_CODE", ""));
       return body;
@@ -96,7 +97,21 @@ public class ApiController {
 
   @GetMapping("/api/stats/database")
   public Map<String, Object> databaseStats() {
-    return trace("/api/stats/database", repository::databaseStats);
+    return trace("/api/stats/database", realtimeService::databaseStats);
+  }
+
+  @GetMapping("/api/stats/global-summary")
+  public Map<String, Object> globalSummary(@RequestParam(required = false) String timePoint,
+      @RequestParam(required = false) String hours) {
+    return trace("/api/stats/global-summary", () -> {
+      TimeWindow timeWindow = realtimeService.globalWindowFromParams(timePoint, hours);
+      Map<String, Object> database = realtimeService.databaseStats();
+      Map<String, Object> window = repository.windowStats(timeWindow.start(), timeWindow.end());
+      return Map.of(
+          "databaseTrackPoints", database.get("trackPoints"),
+          "databaseShips", database.get("ships"),
+          "windowTrackPoints", window.get("trackPoints"));
+    });
   }
 
   @GetMapping("/api/stats/multi-summary")
@@ -107,6 +122,30 @@ public class ApiController {
       TimeWindow time = realtimeService.validateTimeWindow(start, end);
       BBox bbox = bboxOrNull(west, south, east, north);
       return repository.multiStats(time.start(), time.end(), bbox);
+    });
+  }
+
+  @GetMapping("/api/stats/single-track-points")
+  public Map<String, Object> singleTrackPointStats(@RequestParam String shipId, @RequestParam String start,
+      @RequestParam String end) {
+    return trace("/api/stats/single-track-points", () -> {
+      if (shipId == null || shipId.isBlank()) {
+        throw new IllegalArgumentException("shipId parameter is required");
+      }
+      TimeWindow time = realtimeService.validateTimeWindow(start, end);
+      return Map.of("trackPoints", repository.singleTrackPointCount(shipId, time.start(), time.end()));
+    });
+  }
+
+  @PostMapping("/api/stats/multi-track-points")
+  public Map<String, Object> multiTrackPointStats(@RequestBody MultiTrackRequest body) {
+    return trace("/api/stats/multi-track-points", () -> {
+      List<String> shipIds = body.shipIds == null ? List.of() : body.shipIds.stream().limit(config.query.maxMultiShips).toList();
+      if (shipIds.isEmpty()) {
+        throw new IllegalArgumentException("shipIds parameter is required");
+      }
+      TimeWindow time = realtimeService.validateTimeWindow(body.start, body.end);
+      return Map.of("trackPoints", repository.multiTrackPointCount(shipIds, time.start(), time.end()));
     });
   }
 
@@ -124,13 +163,21 @@ public class ApiController {
 
   @GetMapping("/api/tracks/single")
   public Map<String, Object> single(@RequestParam String shipId, @RequestParam String start, @RequestParam String end,
-      @RequestParam(required = false) String zoom) {
+      @RequestParam(required = false) String zoom, @RequestParam(required = false) String samplingMode,
+      @RequestParam(required = false) String bucketSeconds) {
     return trace("/api/tracks/single", () -> {
       if (shipId == null || shipId.isBlank()) {
         throw new IllegalArgumentException("shipId parameter is required");
       }
       TimeWindow time = realtimeService.validateTimeWindow(start, end);
-      return Map.of("items", repository.singleTrackRows(shipId, time.start(), time.end(), realtimeService.validateZoom(zoom), null));
+      return Map.of("items", repository.singleTrackRows(
+          shipId,
+          time.start(),
+          time.end(),
+          realtimeService.validateZoom(zoom),
+          null,
+          normalizeSamplingMode(samplingMode),
+          parseBucketSeconds(bucketSeconds)));
     });
   }
 
@@ -157,17 +204,30 @@ public class ApiController {
       }
       TimeWindow time = realtimeService.validateTimeWindow(body.start, body.end);
       int zoom = body.zoom == null ? config.map.defaultZoom : body.zoom;
-      BBox bbox = body.bbox == null ? null : body.bbox.toBBox();
-      return Map.of("items", repository.trackRows(shipIds, time.start(), time.end(), zoom, bbox, "multi"));
+      return Map.of("items", repository.trackRows(
+          shipIds,
+          time.start(),
+          time.end(),
+          zoom,
+          null,
+          "multi",
+          normalizeSamplingMode(body.samplingMode),
+          body.bucketSeconds));
     });
   }
 
   @GetMapping("/api/tracks/global-segment")
-  public Map<String, Object> globalSegment(@RequestParam String start, @RequestParam String end, @RequestParam String west,
-      @RequestParam String south, @RequestParam String east, @RequestParam String north, @RequestParam(required = false) String zoom) {
+  public Map<String, Object> globalSegment(@RequestParam(required = false) String timePoint,
+      @RequestParam(required = false) String hours, @RequestParam(required = false) String zoom,
+      @RequestParam(required = false) String samplingMode, @RequestParam(required = false) String bucketSeconds) {
     return trace("/api/tracks/global-segment", () -> {
-      TimeWindow time = realtimeService.validateTimeWindow(start, end);
-      return Map.of("items", repository.globalSegment(time.start(), time.end(), bbox(west, south, east, north), realtimeService.validateZoom(zoom)));
+      TimeWindow time = realtimeService.globalWindowFromParams(timePoint, hours);
+      return Map.of("items", repository.globalSegment(
+          time.start(),
+          time.end(),
+          realtimeService.validateZoom(zoom),
+          normalizeSamplingMode(samplingMode),
+          parseBucketSeconds(bucketSeconds)));
     });
   }
 
@@ -206,6 +266,24 @@ public class ApiController {
       }
     }
     return values.isEmpty() ? List.of("ais") : values;
+  }
+
+  private String normalizeSamplingMode(String samplingMode) {
+    if (samplingMode == null) {
+      return "auto";
+    }
+    String normalized = samplingMode.trim().toLowerCase();
+    return switch (normalized) {
+      case "raw", "manual", "auto" -> normalized;
+      default -> "auto";
+    };
+  }
+
+  private Integer parseBucketSeconds(String bucketSeconds) {
+    if (bucketSeconds == null || bucketSeconds.isBlank()) {
+      return null;
+    }
+    return Math.max(1, Integer.parseInt(bucketSeconds));
   }
 
   private <T> T trace(String endpoint, Supplier<T> action) {
@@ -278,6 +356,8 @@ public class ApiController {
     public String start;
     public String end;
     public Integer zoom;
+    public String samplingMode;
+    public Integer bucketSeconds;
     public RequestBBox bbox;
   }
 

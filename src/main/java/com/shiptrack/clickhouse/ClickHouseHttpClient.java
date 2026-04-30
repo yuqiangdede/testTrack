@@ -18,6 +18,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.StringJoiner;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -27,6 +29,7 @@ import com.shiptrack.telemetry.RequestMetricsService;
 public class ClickHouseHttpClient {
   private static final Logger log = LoggerFactory.getLogger(ClickHouseHttpClient.class);
   private static final TypeReference<LinkedHashMap<String, Object>> MAP_TYPE = new TypeReference<>() {};
+  private static final Pattern PARAM_PATTERN = Pattern.compile("\\{([A-Za-z0-9_]+):\\s*[^}]+\\}");
 
   private final ObjectMapper objectMapper;
   private final HttpClient httpClient;
@@ -80,6 +83,10 @@ public class ClickHouseHttpClient {
   private String post(String body, Map<String, Object> params, boolean wrapConnectionError, int timeoutSeconds, int maxExecutionTime) {
     URI uri = URI.create(parsedJdbc.url + "?" + queryString(params, maxExecutionTime));
     String auth = Base64.getEncoder().encodeToString((config.clickhouse.username + ":" + config.clickhouse.password).getBytes(StandardCharsets.UTF_8));
+    if (config.query.logSql) {
+      log.info("ClickHouse SQL endpoint={} timeoutSeconds={} maxExecutionTime={} sql=\n{}",
+          uri, timeoutSeconds, maxExecutionTime, renderSql(body, params));
+    }
     HttpRequest.Builder request = HttpRequest.newBuilder(uri)
         .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
         .header("Authorization", "Basic " + auth)
@@ -135,6 +142,44 @@ public class ClickHouseHttpClient {
       return joiner.toString();
     }
     return String.valueOf(value);
+  }
+
+  private String renderSql(String sql, Map<String, Object> params) {
+    Matcher matcher = PARAM_PATTERN.matcher(sql);
+    StringBuffer rendered = new StringBuffer();
+    while (matcher.find()) {
+      String name = matcher.group(1);
+      if (!params.containsKey(name)) {
+        matcher.appendReplacement(rendered, Matcher.quoteReplacement(matcher.group(0)));
+        continue;
+      }
+      matcher.appendReplacement(rendered, Matcher.quoteReplacement(toSqlLiteral(params.get(name))));
+    }
+    matcher.appendTail(rendered);
+    return rendered.toString();
+  }
+
+  private String toSqlLiteral(Object value) {
+    if (value == null) {
+      return "NULL";
+    }
+    if (value instanceof Boolean booleanValue) {
+      return booleanValue ? "1" : "0";
+    }
+    if (value instanceof String || value instanceof CharSequence) {
+      return SqlUtil.sqlString(String.valueOf(value));
+    }
+    if (value instanceof Number) {
+      return String.valueOf(value);
+    }
+    if (value instanceof Iterable<?> iterable) {
+      StringJoiner joiner = new StringJoiner(",", "[", "]");
+      for (Object item : iterable) {
+        joiner.add(toSqlLiteral(item));
+      }
+      return joiner.toString();
+    }
+    return SqlUtil.sqlString(String.valueOf(value));
   }
 
   private String urlEncode(String value) {

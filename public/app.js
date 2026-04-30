@@ -13,11 +13,15 @@
     drawerVisible: false,
     candidateLoading: false,
     candidateQueryElapsedMs: null,
+    candidateLoadSeq: 0,
+    candidateBatchCount: 0,
+    candidateHasMore: false,
     candidatePages: [],
     candidateCurrentPage: 1,
-    candidateBatchPages: 10,
     selectedShips: [],
-    selectedTrackPoints: 0,
+    selectedRawTrackPoints: 0,
+    selectedSampledTrackPoints: 0,
+    selectedStatsSeq: 0,
     stats: {
       databaseTrackPoints: 0,
       databaseShips: 0,
@@ -27,12 +31,18 @@
       bboxShips: 0,
       summaryWindowKey: "",
       summaryTimer: null,
-      summarySeq: 0
+      summarySeq: 0,
+      summaryInFlightKey: "",
+      summaryInFlightPromise: null
     }
   },
   playing: false,
   playIndex: 0,
   speed: 4,
+  sampling: {
+    mode: "auto",
+    bucketSeconds: 60
+  },
   stats: {
     databaseTrackPoints: 0,
     databaseShips: 0,
@@ -42,16 +52,32 @@
     viewportHeatCells: 0,
     viewportShips: 0,
     memoryShips: 0,
-    singleTrackPoints: 0,
+    singleRawTrackPoints: 0,
+    singleSampledTrackPoints: 0,
+    singleStatsSeq: 0,
     databaseStatsLoaded: false,
     summaryWindowKey: "",
     summaryTimer: null,
     summarySeq: 0
   },
+  global: {
+    stats: {
+      databaseTrackPoints: 0,
+      databaseShips: 0,
+      windowTrackPoints: 0,
+      sampledTrackPoints: 0,
+      statsSeq: 0,
+      summaryWindowKey: "",
+      summaryTimer: null,
+      summarySeq: 0
+    }
+  },
   layers: {
     heat: null,
     trackSource: null,
     trackLayer: null,
+    playbackTrackSource: null,
+    playbackTrackLayer: null,
     markerSource: null,
     markerLayer: null,
     rectangleSource: null,
@@ -60,6 +86,8 @@
     lines: [],
     lineQueue: [],
     lineTimer: null,
+    trackRenderSeq: 0,
+    trackRenderCallbacks: [],
     realtimeRenderTimer: null,
     realtimeCanvas: null,
     realtimeCtx: null,
@@ -82,6 +110,11 @@
     grid: new Map(),
     itemCells: new Map(),
     cellSize: 0.05
+  },
+  apiTrace: {
+    seq: 0,
+    history: [],
+    hidden: false
   }
 };
 
@@ -90,12 +123,15 @@ const REALTIME_HIT_CELL_SIZE = 32;
 const REALTIME_HIT_RADIUS = 12;
 const REALTIME_DRAW_BUDGET_MS = 8;
 const REALTIME_DRAW_BATCH = 2500;
-const RADAR_SHIP_ID_PATTERN = /^\d+(?:[-_]\d+)+$/;
-
 const AMAP_TILE_URL = "https://webrd0{sub}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}";
 const STATS_CACHE_TTL_MS = 5 * 60 * 1000;
 const SUMMARY_CACHE_TTL_MS = 30 * 1000;
+const API_TRACE_MAX_HISTORY = 3;
+const API_TRACE_HIDDEN_KEY = "shiptrack.apiTrace.hidden";
 const statsRequestCache = new Map();
+const PLAYBACK_SPEED_OPTIONS = [1, 2, 4, 8, 16, 64, 128];
+const TRACK_LINE_OPACITY = 0.24;
+const PLAYBACK_LINE_OPACITY = 0.96;
 
 const $ = (id) => document.getElementById(id);
 
@@ -109,8 +145,144 @@ function showError(text) {
   panel.classList.remove("hidden");
 }
 
-async function getJson(url) {
-  const response = await fetch(url);
+function loadApiTraceHidden() {
+  try {
+    return localStorage.getItem(API_TRACE_HIDDEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveApiTraceHidden(hidden) {
+  try {
+    localStorage.setItem(API_TRACE_HIDDEN_KEY, hidden ? "1" : "0");
+  } catch {}
+}
+
+function setApiTraceHidden(hidden) {
+  state.apiTrace.hidden = Boolean(hidden);
+  saveApiTraceHidden(state.apiTrace.hidden);
+  renderApiTracePanel();
+}
+
+function shouldTraceApi(url) {
+  return !String(url || "").startsWith("/api/stats/") && String(url || "") !== "/api/config/map";
+}
+
+function apiTraceLabel(url, method = "GET") {
+  let pathname = String(url || "");
+  try {
+    pathname = new URL(url, location.href).pathname || pathname;
+  } catch {}
+  pathname = pathname.replace(/^\/+/, "");
+  if (pathname.startsWith("api/")) {
+    pathname = pathname.slice(4);
+  }
+  const normalizedMethod = String(method || "GET").toUpperCase();
+  return normalizedMethod === "GET" ? pathname : `${normalizedMethod} ${pathname}`;
+}
+
+function renderApiTracePanel(activeTrace = null) {
+  const panel = $("api-trace");
+  const toggle = $("api-trace-toggle");
+  if (!panel) return;
+  if (state.apiTrace.hidden) {
+    panel.classList.add("hidden");
+    if (toggle) {
+      toggle.classList.remove("hidden");
+    }
+    panel.textContent = "";
+    return;
+  }
+  const recentHistory = state.apiTrace.history
+    .filter((trace) => trace && trace.id !== activeTrace?.id)
+    .sort((left, right) => Number(right.startedAt || 0) - Number(left.startedAt || 0));
+  const traces = [];
+  if (activeTrace) {
+    traces.push(activeTrace);
+  }
+  traces.push(...recentHistory);
+  panel.classList.toggle("hidden", traces.length === 0);
+  if (toggle) {
+    toggle.classList.add("hidden");
+  }
+  if (!traces.length) {
+    panel.textContent = "";
+    return;
+  }
+  panel.innerHTML = traces.map((trace, index) => {
+    const entries = trace.entries || [];
+    const body = entries.length
+      ? entries.map((entry) => `
+          <div class="api-trace-item">
+            <code>${escapeHtml(entry.label)}</code>
+            <span>${escapeHtml(entry.elapsedMs)} ms</span>
+          </div>
+        `).join("")
+      : `<div class="api-trace-empty">等待接口返回</div>`;
+    return `
+      <section class="api-trace-card ${index === 0 ? "is-active" : ""}">
+        <div class="api-trace-header">
+          <strong>${escapeHtml(trace.title)}</strong>
+          <button class="api-trace-close" type="button" data-api-trace-close aria-label="关闭接口耗时浮层">×</button>
+        </div>
+        <div class="api-trace-header">
+          <span>${escapeHtml(trace.finished ? "已完成" : "进行中")} · ${escapeHtml(entries.length)} 项</span>
+        </div>
+        <div class="api-trace-list">${body}</div>
+      </section>
+    `;
+  }).join("");
+  panel.querySelectorAll("[data-api-trace-close]").forEach((button) => {
+    button.onclick = () => setApiTraceHidden(true);
+  });
+}
+
+function beginApiTrace(title) {
+  const trace = {
+    id: ++state.apiTrace.seq,
+    title,
+    startedAt: performance.now(),
+    entries: [],
+    finished: false
+  };
+  renderApiTracePanel(trace);
+  return trace;
+}
+
+function recordApiTrace(trace, url, method, elapsedMs) {
+  if (!trace || trace.finished || !shouldTraceApi(url)) {
+    return;
+  }
+  trace.entries.push({
+    label: apiTraceLabel(url, method),
+    elapsedMs: Math.max(0, Math.round(elapsedMs))
+  });
+  renderApiTracePanel(trace);
+}
+
+function finishApiTrace(trace) {
+  if (!trace || trace.finished) {
+    return;
+  }
+  trace.finished = true;
+  state.apiTrace.history = [trace, ...state.apiTrace.history.filter((item) => item.id !== trace.id)].slice(0, API_TRACE_MAX_HISTORY);
+  renderApiTracePanel(trace);
+}
+
+async function requestJson(url, options = {}) {
+  const { trace, ...fetchOptions } = options;
+  const startedAt = performance.now();
+  let response;
+  try {
+    response = await fetch(url, fetchOptions);
+  } catch (error) {
+    const elapsedMs = Math.max(0, performance.now() - startedAt);
+    recordApiTrace(trace, url, fetchOptions.method || "GET", elapsedMs);
+    throw error;
+  }
+  const elapsedMs = Math.max(0, performance.now() - startedAt);
+  recordApiTrace(trace, url, fetchOptions.method || "GET", elapsedMs);
   if (!response.ok) {
     const text = await response.text();
     let message = text;
@@ -120,6 +292,10 @@ async function getJson(url) {
     throw new Error(message);
   }
   return response.json();
+}
+
+async function getJson(url, options = {}) {
+  return requestJson(url, { ...options, method: "GET" });
 }
 
 async function getCachedJson(url, ttlMs = STATS_CACHE_TTL_MS) {
@@ -150,21 +326,25 @@ async function getCachedJson(url, ttlMs = STATS_CACHE_TTL_MS) {
   return entry.promise;
 }
 
-async function postJson(url, body) {
-  const response = await fetch(url, {
+function applyDatabaseStats(databaseTrackPoints, databaseShips) {
+  const trackPoints = Number(databaseTrackPoints || 0);
+  const ships = Number(databaseShips || 0);
+  state.stats.databaseTrackPoints = trackPoints;
+  state.stats.databaseShips = ships;
+  state.stats.databaseStatsLoaded = true;
+  state.multi.stats.databaseTrackPoints = trackPoints;
+  state.multi.stats.databaseShips = ships;
+  state.global.stats.databaseTrackPoints = trackPoints;
+  state.global.stats.databaseShips = ships;
+}
+
+async function postJson(url, body, options = {}) {
+  return requestJson(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    trace: options.trace
   });
-  if (!response.ok) {
-    const text = await response.text();
-    let message = text;
-    try {
-      message = JSON.parse(text).error || text;
-    } catch {}
-    throw new Error(message);
-  }
-  return response.json();
 }
 
 function outOfChina(lng, lat) {
@@ -286,6 +466,92 @@ function analysisWindowParams() {
   return null;
 }
 
+function ensureGlobalWindowDefaults() {
+  const point = $("global-point");
+  if (point && !point.value) {
+    point.value = toLocalDatetime(new Date());
+  }
+  const hours = $("global-hours");
+  if (hours && !hours.value) {
+    hours.value = String(Math.max(1, Number(state.config?.globalSegmentHours || 1)));
+  }
+}
+
+function globalWindowParams() {
+  ensureGlobalWindowDefaults();
+  const point = $("global-point")?.value;
+  if (!point) return null;
+  const pointDate = new Date(point);
+  if (!Number.isFinite(pointDate.getTime())) return null;
+  const hours = Math.max(1, Number($("global-hours")?.value || state.config?.globalSegmentHours || 1));
+  return { timePoint: toIso(pointDate), hours };
+}
+
+function normalizeSamplingMode(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "raw" || normalized === "manual" || normalized === "auto") {
+    return normalized;
+  }
+  return "auto";
+}
+
+function normalizeBucketSeconds(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return 60;
+  }
+  return Math.max(1, Math.floor(number));
+}
+
+function syncSamplingControls() {
+  const modeSelect = $("track-sampling-mode");
+  const bucketGroup = $("track-sampling-bucket-group");
+  const bucketInput = $("track-sampling-bucket");
+  const hint = $("track-sampling-hint");
+  const mode = normalizeSamplingMode(modeSelect?.value || state.sampling.mode);
+  const bucketSeconds = normalizeBucketSeconds(bucketInput?.value || state.sampling.bucketSeconds);
+  state.sampling.mode = mode;
+  state.sampling.bucketSeconds = bucketSeconds;
+  if (modeSelect && modeSelect.value !== mode) {
+    modeSelect.value = mode;
+  }
+  if (bucketGroup) {
+    bucketGroup.classList.toggle("hidden", mode !== "manual");
+  }
+  if (bucketInput) {
+    bucketInput.value = String(bucketSeconds);
+    bucketInput.disabled = mode !== "manual";
+  }
+  if (hint) {
+    hint.textContent = mode === "manual" ? "人工指定时直接按桶秒数抽稀，输入值会完全生效。" : "";
+  }
+}
+
+function activeSamplingParams() {
+  syncSamplingControls();
+  return {
+    samplingMode: state.sampling.mode,
+    bucketSeconds: state.sampling.bucketSeconds
+  };
+}
+
+function playbackPointLabel() {
+  return state.sampling.mode === "raw" ? "原始点" : "抽稀点";
+}
+
+async function reloadActivePlaybackTrack() {
+  if (state.mode === "single") {
+    return loadSingleTrack();
+  }
+  if (state.mode === "multi") {
+    return loadMultiTrack();
+  }
+  if (state.mode === "global") {
+    return loadGlobalSegment();
+  }
+  return null;
+}
+
 function syncSingleWindowInputs(windowValue) {
   if (!windowValue?.end) return;
   const point = $("single-point");
@@ -380,7 +646,7 @@ function normalizeRealtimeItem(item) {
     speed: Number(item.speed || 0),
     heading: Number(item.heading || 0),
     time: item.time || "",
-    isAis: RADAR_SHIP_ID_PATTERN.test(String(item.shipId || "")) ? 0 : Number(item.isAis || 0)
+    isAis: Number(item.isAis || 0)
   };
 }
 
@@ -573,6 +839,26 @@ function metricNumber(value) {
   return Number.isFinite(number) ? number.toLocaleString() : "0";
 }
 
+function withOpacity(color, opacity) {
+  if (!color) return color;
+  const alpha = Math.max(0, Math.min(1, Number(opacity)));
+  if (color.startsWith("#")) {
+    const hex = color.slice(1);
+    const normalized = hex.length === 3
+      ? hex.split("").map((part) => part + part).join("")
+      : hex;
+    if (normalized.length === 6) {
+      const r = Number.parseInt(normalized.slice(0, 2), 16);
+      const g = Number.parseInt(normalized.slice(2, 4), 16);
+      const b = Number.parseInt(normalized.slice(4, 6), 16);
+      if ([r, g, b].every(Number.isFinite)) {
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+      }
+    }
+  }
+  return color;
+}
+
 function updateMetrics() {
   $("metric-realtime-db-points").textContent = metricNumber(state.stats.databaseTrackPoints);
   $("metric-realtime-db-ships").textContent = metricNumber(state.stats.databaseShips);
@@ -588,14 +874,20 @@ function updateMetrics() {
   $("metric-analysis-viewport-heat-cells").textContent = metricNumber(state.stats.viewportHeatCells);
   $("metric-single-db-points").textContent = metricNumber(state.stats.databaseTrackPoints);
   $("metric-single-db-ships").textContent = metricNumber(state.stats.databaseShips);
-  $("metric-single-track-points").textContent = metricNumber(state.stats.singleTrackPoints);
+  $("metric-single-track-points").textContent = metricNumber(state.stats.singleRawTrackPoints);
+  $("metric-single-sampled-points").textContent = metricNumber(state.stats.singleSampledTrackPoints);
   $("metric-multi-db-points").textContent = metricNumber(state.multi.stats.databaseTrackPoints);
   $("metric-multi-db-ships").textContent = metricNumber(state.multi.stats.databaseShips);
   $("metric-multi-window-points").textContent = metricNumber(state.multi.stats.windowTrackPoints);
   $("metric-multi-window-ships").textContent = metricNumber(state.multi.stats.windowShips);
   $("metric-multi-bbox-points").textContent = metricNumber(state.multi.stats.bboxTrackPoints);
   $("metric-multi-bbox-ships").textContent = metricNumber(state.multi.stats.bboxShips);
-  $("metric-multi-selected-points").textContent = metricNumber(state.multi.selectedTrackPoints);
+  $("metric-multi-selected-points").textContent = metricNumber(state.multi.selectedRawTrackPoints);
+  $("metric-multi-sampled-points").textContent = metricNumber(state.multi.selectedSampledTrackPoints);
+  $("metric-global-db-points").textContent = metricNumber(state.global.stats.databaseTrackPoints);
+  $("metric-global-db-ships").textContent = metricNumber(state.global.stats.databaseShips);
+  $("metric-global-window-points").textContent = metricNumber(state.global.stats.windowTrackPoints);
+  $("metric-global-sampled-points").textContent = metricNumber(state.global.stats.sampledTrackPoints);
   $("progress").max = Math.max(0, state.trackPoints.length - 1);
   $("progress").value = state.playIndex;
   $("active-time").textContent = state.trackPoints[state.playIndex]?.time || "--";
@@ -608,7 +900,7 @@ function activeStatsWindow() {
   if (state.mode === "analysis") {
     return analysisWindowParams();
   }
-  if (["multi", "global"].includes(state.mode)) {
+  if (state.mode === "multi") {
     const start = $("start")?.value;
     const end = $("end")?.value;
     if (!start || !end) return null;
@@ -629,9 +921,6 @@ async function refreshRealtimeSummary() {
   const data = await getCachedJson(`/api/stats/realtime-summary?${params}`, SUMMARY_CACHE_TTL_MS);
   if (seq !== state.stats.summarySeq) return;
   state.stats.summaryWindowKey = summaryKey;
-  state.stats.databaseTrackPoints = Number(data.databaseTrackPoints || 0);
-  state.stats.databaseShips = Number(data.databaseShips || 0);
-  state.stats.databaseStatsLoaded = true;
   state.stats.windowTrackPoints = Number(data.windowTrackPoints || 0);
   state.stats.windowShips = Number(data.windowShips || 0);
   if (analysisMode) {
@@ -651,10 +940,50 @@ function scheduleRealtimeSummary(delay = 260) {
 
 async function refreshDatabaseStats() {
   const data = await getCachedJson("/api/stats/database", STATS_CACHE_TTL_MS);
-  state.stats.databaseTrackPoints = Number(data.databaseTrackPoints ?? data.trackPoints ?? 0);
-  state.stats.databaseShips = Number(data.databaseShips ?? data.ships ?? 0);
-  state.stats.databaseStatsLoaded = true;
+  applyDatabaseStats(data.databaseTrackPoints ?? data.trackPoints ?? 0, data.databaseShips ?? data.ships ?? 0);
   updateMetrics();
+}
+
+async function refreshSingleTrackPointStats(windowValue, shipId, seq) {
+  if (!windowValue || !shipId) return;
+  const params = qs({ shipId, ...windowValue });
+  const data = await getJson(`/api/stats/single-track-points?${params}`);
+  if (seq !== state.stats.singleStatsSeq) return;
+  state.stats.singleRawTrackPoints = Number(data.trackPoints || 0);
+  updateMetrics();
+}
+
+async function refreshSelectedMultiTrackPointStats(windowValue, shipIds, seq) {
+  if (!windowValue || !shipIds.length) return;
+  const data = await postJson("/api/stats/multi-track-points", {
+    shipIds,
+    start: windowValue.start,
+    end: windowValue.end
+  });
+  if (seq !== state.multi.selectedStatsSeq) return;
+  state.multi.selectedRawTrackPoints = Number(data.trackPoints || 0);
+  updateMetrics();
+}
+
+async function refreshGlobalSummary() {
+  const windowValue = globalWindowParams();
+  if (!windowValue) return;
+  const summaryKey = JSON.stringify({ windowValue });
+  if (summaryKey === state.global.stats.summaryWindowKey) return;
+  const seq = ++state.global.stats.summarySeq;
+  const data = await getCachedJson(`/api/stats/global-summary?${qs(windowValue)}`, SUMMARY_CACHE_TTL_MS);
+  if (seq !== state.global.stats.summarySeq) return;
+  state.global.stats.summaryWindowKey = summaryKey;
+  state.global.stats.windowTrackPoints = Number(data.windowTrackPoints || 0);
+  updateMetrics();
+}
+
+function scheduleGlobalSummary(delay = 260) {
+  if (state.global.stats.summaryTimer) clearTimeout(state.global.stats.summaryTimer);
+  state.global.stats.summaryTimer = setTimeout(() => {
+    state.global.stats.summaryTimer = null;
+    refreshGlobalSummary().catch((error) => setStatus("全域统计刷新失败: " + error.message));
+  }, delay);
 }
 
 async function refreshMultiSummary() {
@@ -662,6 +991,8 @@ async function refreshMultiSummary() {
   const end = $("end")?.value;
   if (!start || !end) {
     state.multi.stats.summaryWindowKey = "";
+    state.multi.stats.summaryInFlightKey = "";
+    state.multi.stats.summaryInFlightPromise = null;
     state.multi.stats.databaseTrackPoints = 0;
     state.multi.stats.databaseShips = 0;
     state.multi.stats.windowTrackPoints = 0;
@@ -674,22 +1005,34 @@ async function refreshMultiSummary() {
   const bbox = state.multi.bbox;
   const summaryKey = JSON.stringify({ start, end, bbox });
   if (summaryKey === state.multi.stats.summaryWindowKey) return;
+  if (summaryKey === state.multi.stats.summaryInFlightKey && state.multi.stats.summaryInFlightPromise) {
+    return state.multi.stats.summaryInFlightPromise;
+  }
   const seq = ++state.multi.stats.summarySeq;
   const params = qs({
     start: toIso(start),
     end: toIso(end),
     ...(bbox || {})
   });
-  const data = await getCachedJson(`/api/stats/multi-summary?${params}`, SUMMARY_CACHE_TTL_MS);
-  if (seq !== state.multi.stats.summarySeq) return;
-  state.multi.stats.summaryWindowKey = summaryKey;
-  state.multi.stats.databaseTrackPoints = Number(data.databaseTrackPoints || 0);
-  state.multi.stats.databaseShips = Number(data.databaseShips || 0);
-  state.multi.stats.windowTrackPoints = Number(data.windowTrackPoints || 0);
-  state.multi.stats.windowShips = Number(data.windowShips || 0);
-  state.multi.stats.bboxTrackPoints = Number(data.bboxTrackPoints || 0);
-  state.multi.stats.bboxShips = Number(data.bboxShips || 0);
-  updateMetrics();
+  const promise = getCachedJson(`/api/stats/multi-summary?${params}`, SUMMARY_CACHE_TTL_MS)
+    .then((data) => {
+      if (seq !== state.multi.stats.summarySeq) return;
+      state.multi.stats.summaryWindowKey = summaryKey;
+      state.multi.stats.windowTrackPoints = Number(data.windowTrackPoints || 0);
+      state.multi.stats.windowShips = Number(data.windowShips || 0);
+      state.multi.stats.bboxTrackPoints = Number(data.bboxTrackPoints || 0);
+      state.multi.stats.bboxShips = Number(data.bboxShips || 0);
+      updateMetrics();
+    })
+    .finally(() => {
+      if (state.multi.stats.summaryInFlightPromise === promise) {
+        state.multi.stats.summaryInFlightKey = "";
+        state.multi.stats.summaryInFlightPromise = null;
+      }
+    });
+  state.multi.stats.summaryInFlightKey = summaryKey;
+  state.multi.stats.summaryInFlightPromise = promise;
+  return promise;
 }
 
 function scheduleMultiSummary(delay = 260) {
@@ -704,8 +1047,14 @@ function resetTrackPlaybackState() {
   state.playing = false;
   state.playIndex = 0;
   state.trackPoints = [];
-  state.stats.singleTrackPoints = 0;
-  state.multi.selectedTrackPoints = 0;
+  state.stats.singleStatsSeq += 1;
+  state.stats.singleRawTrackPoints = 0;
+  state.stats.singleSampledTrackPoints = 0;
+  state.multi.selectedStatsSeq += 1;
+  state.multi.selectedRawTrackPoints = 0;
+  state.multi.selectedSampledTrackPoints = 0;
+  state.global.stats.statsSeq += 1;
+  state.global.stats.sampledTrackPoints = 0;
   syncPlayButtons();
   $("progress").value = 0;
   $("active-time").textContent = "--";
@@ -716,17 +1065,53 @@ function syncPlayButtons() {
   const mainPlay = $("play");
   if (mainPlay) {
     mainPlay.textContent = playing ? "⏸" : "▶";
-    mainPlay.classList.toggle("hidden", state.mode === "multi");
+    mainPlay.disabled = !state.trackPoints.length;
   }
-  const candidatePlay = $("candidate-play");
-  if (candidatePlay) {
-    candidatePlay.textContent = playing ? "暂停" : "播放";
+  const speedSelect = $("speed");
+  if (speedSelect) {
+    const normalizedSpeed = PLAYBACK_SPEED_OPTIONS.includes(Number(state.speed)) ? Number(state.speed) : 4;
+    if (normalizedSpeed !== state.speed) {
+      state.speed = normalizedSpeed;
+    }
+    speedSelect.value = String(normalizedSpeed);
   }
 }
 
-function togglePlayback() {
-  state.playing = !state.playing;
+function pausePlayback() {
+  state.playing = false;
   syncPlayButtons();
+}
+
+function startPlayback() {
+  if (!state.trackPoints.length) return;
+  if (state.playIndex >= state.trackPoints.length - 1) {
+    state.playIndex = 0;
+    $("progress").value = 0;
+  }
+  state.playing = true;
+  syncPlayButtons();
+  renderPlaybackMarkers();
+}
+
+function togglePlayback() {
+  if (state.playing) {
+    pausePlayback();
+    return;
+  }
+  startPlayback();
+}
+
+function exitPlayback() {
+  if (!["single", "multi", "global"].includes(state.mode)) return;
+  const previousMode = state.mode;
+  resetTrackPlaybackState();
+  switchMode("realtime");
+  updateMetrics();
+  setStatus({
+    single: "已退出单船轨迹，回到实时位置展示",
+    multi: "已退出多船轨迹，回到实时位置展示",
+    global: "已退出全域回放，回到实时位置展示"
+  }[previousMode] || "已退出回放，回到实时位置展示");
 }
 
 function switchMode(mode) {
@@ -741,9 +1126,13 @@ function switchMode(mode) {
   $("analysis-stats-section")?.classList.toggle("hidden", mode !== "analysis");
   $("single-stats-section")?.classList.toggle("hidden", mode !== "single");
   $("multi-stats-section")?.classList.toggle("hidden", mode !== "multi");
+  $("global-stats-section")?.classList.toggle("hidden", mode !== "global");
   $(`${mode}-panel`)?.classList.remove("hidden");
-  $("time-section").classList.toggle("hidden", !["multi", "global"].includes(mode));
+  $("time-section").classList.toggle("hidden", mode !== "multi");
   $("player").classList.toggle("hidden", !["single", "multi", "global"].includes(mode));
+  if (["single", "multi", "global"].includes(mode)) {
+    syncSamplingControls();
+  }
   $("panel-title").textContent = {
     realtime: "实时位置展示",
     analysis: "历史态势分析",
@@ -756,8 +1145,15 @@ function switchMode(mode) {
   if (mode === "analysis") renderHeat();
   if (["single", "multi", "global"].includes(mode)) renderTracks();
   renderCandidateDrawer();
+  if (previousMode === "global" && mode !== "global" && state.global.stats.summaryTimer) {
+    clearTimeout(state.global.stats.summaryTimer);
+    state.global.stats.summaryTimer = null;
+  }
   if (mode === "multi") {
     scheduleMultiSummary(previousMode === mode ? 0 : 120);
+  } else if (mode === "global") {
+    ensureGlobalWindowDefaults();
+    scheduleGlobalSummary(previousMode === mode ? 0 : 120);
   } else if (mode !== "single") {
     scheduleRealtimeSummary(previousMode === mode ? 0 : 120);
   }
@@ -774,6 +1170,7 @@ function clearLayers() {
     state.layers.heat = null;
   }
   state.layers.trackSource?.clear();
+  state.layers.playbackTrackSource?.clear();
   state.layers.markerSource?.clear();
   if (state.mode !== "multi") state.layers.rectangleSource?.clear();
   if (state.mode !== "realtime") {
@@ -906,24 +1303,12 @@ function drawShipTriangle(ctx, x, y, heading, color) {
   ctx.restore();
 }
 
-function shipMarkerStyle(point) {
-  if (Number(point?.isAis) === 0) {
-    return new ol.style.Style({
-      image: new ol.style.Circle({
-        radius: 6,
-        fill: new ol.style.Fill({ color: "#22c55e" }),
-        stroke: new ol.style.Stroke({ color: "rgba(255,255,255,0.96)", width: 2 })
-      })
-    });
-  }
+function shipMarkerStyle(color) {
   return new ol.style.Style({
-    image: new ol.style.RegularShape({
-      points: 3,
-      radius: 12,
-      rotation: ((Number(point?.heading) || 0) * Math.PI) / 180,
-      rotateWithView: true,
-      fill: new ol.style.Fill({ color: "#0f62c7" }),
-      stroke: new ol.style.Stroke({ color: "rgba(255,255,255,0.96)", width: 2 })
+    image: new ol.style.Circle({
+      radius: 4.2,
+      fill: new ol.style.Fill({ color }),
+      stroke: new ol.style.Stroke({ color: "rgba(255,255,255,0.96)", width: 1.5 })
     })
   });
 }
@@ -1208,13 +1593,36 @@ function renderHeat() {
   state.layers.heat = heat;
 }
 
+function afterTrackRenderComplete(callback) {
+  const seq = state.layers.trackRenderSeq;
+  state.layers.trackRenderCallbacks.push({ seq, callback });
+  if (!state.layers.lineQueue.length && !state.layers.lineTimer) {
+    flushTrackRenderCallbacks(seq);
+  }
+}
+
+function flushTrackRenderCallbacks(seq = state.layers.trackRenderSeq) {
+  const callbacks = state.layers.trackRenderCallbacks.filter((item) => item.seq === seq);
+  state.layers.trackRenderCallbacks = state.layers.trackRenderCallbacks.filter((item) => item.seq !== seq);
+  callbacks.forEach((item) => {
+    setTimeout(() => {
+      if (item.seq === state.layers.trackRenderSeq) {
+        item.callback();
+      }
+    }, 0);
+  });
+}
+
 function renderTracks() {
   if (!state.map) return;
   if (state.layers.lineTimer) {
     clearTimeout(state.layers.lineTimer);
     state.layers.lineTimer = null;
   }
+  state.layers.trackRenderSeq += 1;
+  state.layers.trackRenderCallbacks = [];
   state.layers.trackSource?.clear();
+  state.layers.playbackTrackSource?.clear();
   state.layers.lines = [];
   const palette = ["#2563eb", "#16a34a", "#dc2626", "#d97706", "#7c3aed", "#0891b2", "#be123c"];
   state.layers.lineQueue = Array.from(groupByShip(state.trackPoints).entries()).map(([ship, points], index) => ({ ship, points, index, palette }));
@@ -1223,6 +1631,7 @@ function renderTracks() {
 }
 
 function drawLineBatch() {
+  state.layers.lineTimer = null;
   const batch = state.layers.lineQueue.splice(0, state.mode === "global" ? 120 : 30);
   batch.forEach(({ ship, points, index, palette }) => {
     const path = points.map(toMapCoordinate);
@@ -1234,18 +1643,47 @@ function drawLineBatch() {
     });
     line.setStyle(new ol.style.Style({
       stroke: new ol.style.Stroke({
-        color: palette[index % palette.length],
+        color: withOpacity(palette[index % palette.length], TRACK_LINE_OPACITY),
         width: state.mode === "global" ? 2 : 4,
-        lineJoin: "round"
+        lineJoin: "round",
+        lineCap: "round"
       })
     }));
-    line.set("opacity", state.mode === "global" ? 0.35 : 0.85);
     state.layers.trackSource?.addFeature(line);
     state.layers.lines.push(line);
   });
   if (state.layers.lineQueue.length) {
     state.layers.lineTimer = setTimeout(drawLineBatch, 16);
+  } else {
+    flushTrackRenderCallbacks();
   }
+}
+
+function updatePlaybackTrail() {
+  if (!state.map || !["single", "multi", "global"].includes(state.mode)) return;
+  state.layers.playbackTrackSource?.clear();
+  const visible = state.trackPoints.slice(0, Math.max(1, state.playIndex + 1));
+  if (visible.length < 2) return;
+  const palette = ["#2563eb", "#16a34a", "#dc2626", "#d97706", "#7c3aed", "#0891b2", "#be123c"];
+  const batchWidth = state.mode === "global" ? 2.5 : 4.5;
+  const grouped = Array.from(groupByShip(visible).entries());
+  grouped.forEach(([ship, points], index) => {
+    if (points.length < 2) return;
+    const line = new ol.Feature({
+      geometry: new ol.geom.LineString(points.map(toMapCoordinate)),
+      ship,
+      points: points.length
+    });
+    line.setStyle(new ol.style.Style({
+      stroke: new ol.style.Stroke({
+        color: withOpacity(palette[index % palette.length], PLAYBACK_LINE_OPACITY),
+        width: batchWidth,
+        lineJoin: "round",
+        lineCap: "round"
+      })
+    }));
+    state.layers.playbackTrackSource?.addFeature(line);
+  });
 }
 
 function renderPlaybackMarkers() {
@@ -1253,17 +1691,19 @@ function renderPlaybackMarkers() {
   state.layers.markerSource?.clear();
   state.layers.markers = [];
   const visible = state.trackPoints.slice(0, Math.max(1, state.playIndex + 1));
-  const latestByShip = new Map();
-  visible.forEach((point) => latestByShip.set(point.shipId, point));
-  latestByShip.forEach((point) => {
+  const palette = ["#2563eb", "#16a34a", "#dc2626", "#d97706", "#7c3aed", "#0891b2", "#be123c"];
+  const grouped = Array.from(groupByShip(visible).entries());
+  grouped.forEach(([ship, points], index) => {
+    const point = points[points.length - 1];
     const marker = new ol.Feature({
       geometry: new ol.geom.Point(toMapCoordinate(point)),
       point
     });
-    marker.setStyle(shipMarkerStyle(point));
+    marker.setStyle(shipMarkerStyle(palette[index % palette.length]));
     state.layers.markerSource?.addFeature(marker);
     state.layers.markers.push(marker);
   });
+  updatePlaybackTrail();
   updateMetrics();
 }
 
@@ -1271,26 +1711,30 @@ async function loadLatest() {
   setStatus("正在加载实时船位");
   state.latest = [];
   const windowQuery = realtimeWindowQuery();
-  const data = await getJson("/api/realtime/latest" + (windowQuery ? "?" + windowQuery : ""));
-  syncRealtimeWindowInputs(data.window);
-  syncAnalysisWindowInputs(data.window);
-  syncSingleWindowInputs(data.window);
-  state.realtimeWindow = data.window || null;
-  buildRealtimeStore(normalizeRealtimeItems(data));
-  state.stats.memoryShips = Number(data.memoryShips ?? state.latest.length ?? 0);
-  const maxTime = state.latest.reduce((max, item) => (item.time > max ? item.time : max), "");
-  if (maxTime) {
-    const end = new Date(maxTime.replace(" ", "T"));
-    const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
-    $("start").value = toLocalDatetime(start);
-    $("end").value = toLocalDatetime(end);
-    $("segment-start").value = toLocalDatetime(start);
+  const trace = beginApiTrace("实时位置");
+  try {
+    const data = await getJson("/api/realtime/latest" + (windowQuery ? "?" + windowQuery : ""), { trace });
+    syncRealtimeWindowInputs(data.window);
+    syncAnalysisWindowInputs(data.window);
+    syncSingleWindowInputs(data.window);
+    state.realtimeWindow = data.window || null;
+    buildRealtimeStore(normalizeRealtimeItems(data));
+    state.stats.memoryShips = Number(data.memoryShips ?? state.latest.length ?? 0);
+    const maxTime = state.latest.reduce((max, item) => (item.time > max ? item.time : max), "");
+    if (maxTime) {
+      const end = new Date(maxTime.replace(" ", "T"));
+      const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
+      $("start").value = toLocalDatetime(start);
+      $("end").value = toLocalDatetime(end);
+    }
+    renderRealtime();
+    updateMetrics();
+    scheduleRealtimeSummary(0);
+    const sourceText = data.source === "memory" ? "内存缓存" : "数据库查询";
+    setStatus(`${sourceText}已加载 ${state.latest.length.toLocaleString()} 条最新船位，当前视野 ${state.stats.viewportShips.toLocaleString()} 艘`);
+  } finally {
+    finishApiTrace(trace);
   }
-  renderRealtime();
-  updateMetrics();
-  scheduleRealtimeSummary(0);
-  const sourceText = data.source === "memory" ? "内存缓存" : "数据库查询";
-  setStatus(`${sourceText}已加载 ${state.latest.length.toLocaleString()} 条最新船位，当前视野 ${state.stats.viewportShips.toLocaleString()} 艘`);
 }
 
 async function loadDensity() {
@@ -1302,19 +1746,21 @@ async function loadDensity() {
     setStatus("分析时间窗无效");
     return;
   }
-  const params = qs({ ...windowValue, zoom: getMapZoom(), ...(currentDataBBox() || {}) });
-  const data = await getJson(`/api/analysis/density?${params}`);
-  state.density = data.items;
-  renderHeat();
-  updateMetrics();
-  scheduleRealtimeSummary(0);
-  setStatus(`密度网格 ${state.density.length.toLocaleString()} 个`);
+  const trace = beginApiTrace("态势分析");
+  try {
+    const params = qs({ ...windowValue, zoom: getMapZoom(), ...(currentDataBBox() || {}) });
+    const data = await getJson(`/api/analysis/density?${params}`, { trace });
+    state.density = data.items;
+    renderHeat();
+    updateMetrics();
+    scheduleRealtimeSummary(0);
+    setStatus(`密度网格 ${state.density.length.toLocaleString()} 个`);
+  } finally {
+    finishApiTrace(trace);
+  }
 }
 
 async function loadSingleTrack() {
-  state.trackPoints = [];
-  state.playIndex = 0;
-  state.stats.singleTrackPoints = 0;
   switchMode("single");
   setStatus("正在查询单船轨迹");
   const windowValue = singleTrackWindowParams();
@@ -1323,24 +1769,49 @@ async function loadSingleTrack() {
     setStatus("单船时间范围无效");
     return;
   }
-  const params = qs({ shipId: $("ship-id").value.trim(), ...windowValue, zoom: getMapZoom() });
-  const data = await getJson(`/api/tracks/single?${params}`);
-  state.trackPoints = data.items;
+  const trace = beginApiTrace("单船轨迹");
+  pausePlayback();
+  const shipId = $("ship-id").value.trim();
+  const statsSeq = ++state.stats.singleStatsSeq;
+  state.trackPoints = [];
   state.playIndex = 0;
-  if (!state.stats.databaseStatsLoaded) {
-    refreshDatabaseStats().catch(() => {});
-  }
-  state.stats.singleTrackPoints = state.trackPoints.length;
+  state.stats.singleRawTrackPoints = 0;
+  state.stats.singleSampledTrackPoints = 0;
   renderTracks();
   updateMetrics();
-  setStatus(`单船轨迹 ${state.stats.singleTrackPoints.toLocaleString()} 个抽稀点`);
-}
-
-function exitSingleTrack() {
-  resetTrackPlaybackState();
-  switchMode("realtime");
-  updateMetrics();
-  setStatus("已退出单船轨迹，回到实时位置展示");
+  syncPlayButtons();
+  try {
+    const sampling = activeSamplingParams();
+    const params = qs({
+      shipId,
+      ...windowValue,
+      zoom: getMapZoom(),
+      samplingMode: sampling.samplingMode,
+      bucketSeconds: sampling.bucketSeconds
+    });
+    const data = await getJson(`/api/tracks/single?${params}`, { trace });
+    state.trackPoints = data.items || [];
+    state.playIndex = 0;
+    if (!state.stats.databaseStatsLoaded) {
+      refreshDatabaseStats().catch(() => {});
+    }
+    renderTracks();
+    afterTrackRenderComplete(() => {
+      if (statsSeq !== state.stats.singleStatsSeq) return;
+      state.stats.singleSampledTrackPoints = state.trackPoints.length;
+      if (sampling.samplingMode === "raw") {
+        state.stats.singleRawTrackPoints = state.trackPoints.length;
+        updateMetrics();
+      } else {
+        updateMetrics();
+        refreshSingleTrackPointStats(windowValue, shipId, statsSeq).catch((error) => setStatus("单船统计刷新失败: " + error.message));
+      }
+    });
+    syncPlayButtons();
+    setStatus(`单船轨迹 ${state.trackPoints.length.toLocaleString()} 个${playbackPointLabel()}`);
+  } finally {
+    finishApiTrace(trace);
+  }
 }
 
 function multiTimeWindowParams() {
@@ -1368,8 +1839,37 @@ function resetMultiCandidates({ preserveDrawer = false } = {}) {
     state.multi.drawerVisible = false;
   }
   state.multi.selectedShips = [];
-  state.multi.selectedTrackPoints = 0;
+  state.multi.selectedStatsSeq += 1;
+  state.multi.selectedRawTrackPoints = 0;
+  state.multi.selectedSampledTrackPoints = 0;
   state.multi.candidateQueryElapsedMs = null;
+}
+
+function clearMultiBBoxAndCandidates() {
+  if (state.layers.drawBoxInteraction) {
+    state.map?.removeInteraction(state.layers.drawBoxInteraction);
+    state.layers.drawBoxInteraction = null;
+  }
+  state.layers.rectangleSource?.clear();
+  state.multi.bbox = null;
+  state.multi.candidateLoadSeq += 1;
+  state.multi.stats.summarySeq += 1;
+  state.multi.stats.summaryInFlightKey = "";
+  state.multi.stats.summaryInFlightPromise = null;
+  if (state.multi.stats.summaryTimer) {
+    clearTimeout(state.multi.stats.summaryTimer);
+    state.multi.stats.summaryTimer = null;
+  }
+  state.multi.stats.summaryWindowKey = "";
+  state.multi.stats.bboxTrackPoints = 0;
+  state.multi.stats.bboxShips = 0;
+  state.multi.candidateLoading = false;
+  state.multi.candidateBatchCount = 0;
+  state.multi.candidateHasMore = false;
+  resetMultiCandidates({ preserveDrawer: true });
+  renderCandidateDrawer();
+  updateMetrics();
+  setStatus("已清空矩形框和候选船舶");
 }
 
 function candidatePageItems(page = state.multi.candidateCurrentPage) {
@@ -1380,19 +1880,28 @@ function loadedCandidateItems() {
   return state.multi.candidatePages.flatMap((page) => page.items);
 }
 
+function multiSelectionLimit() {
+  return Math.max(1, Number(state.config?.maxMultiShips || 1));
+}
+
+function multiSelectionLimitMessage() {
+  return `已选中船舶达到上限，超出部分未纳入播放（上限 ${multiSelectionLimit()}）`;
+}
+
 function multiSelectionShipIds(shipIds) {
+  const limit = multiSelectionLimit();
   const selected = new Set(state.multi.selectedShips);
   for (const shipId of shipIds) {
     if (!shipId) continue;
     selected.add(shipId);
-    if (selected.size >= state.config.maxMultiShips) break;
+    if (selected.size >= limit) break;
   }
   const ordered = loadedCandidateItems()
     .map((item) => item.shipId)
     .filter((shipId) => selected.has(shipId))
-    .slice(0, state.config.maxMultiShips);
+    .slice(0, limit);
   state.multi.selectedShips = ordered;
-  return ordered.length >= state.config.maxMultiShips && selected.size > ordered.length;
+  return ordered.length >= limit && selected.size > ordered.length;
 }
 
 function multiSelectionFromPage(page) {
@@ -1434,7 +1943,7 @@ function renderCandidateDrawer() {
   $("candidate-query-elapsed").textContent = state.multi.candidateQueryElapsedMs == null ? "--" : `${state.multi.candidateQueryElapsedMs} ms`;
   $("candidate-prev-page").disabled = currentPage <= 1;
   $("candidate-next-page").disabled = currentPage >= pageCount;
-  $("candidate-more-pages").disabled = state.multi.candidateLoading;
+  $("candidate-more-pages").disabled = state.multi.candidateLoading || !state.multi.candidateHasMore;
   $("candidate-select-page").disabled = !currentItems.length;
   $("candidate-select-loaded").disabled = !loadedCandidateItems().length;
 
@@ -1457,11 +1966,13 @@ function renderCandidateDrawer() {
     checkbox.onchange = () => {
       if (checkbox.checked) {
         const trimmed = multiSelectionShipIds([ship.shipId]);
-        if (trimmed) setStatus("已选中船舶达到上限，超出部分未纳入播放");
+        if (trimmed) setStatus(multiSelectionLimitMessage());
       } else {
         state.multi.selectedShips = state.multi.selectedShips.filter((id) => id !== ship.shipId);
       }
-      state.multi.selectedTrackPoints = 0;
+      state.multi.selectedStatsSeq += 1;
+      state.multi.selectedRawTrackPoints = 0;
+      state.multi.selectedSampledTrackPoints = 0;
       renderCandidateDrawer();
     };
     const text = document.createElement("div");
@@ -1478,8 +1989,21 @@ function renderCandidateDrawer() {
 }
 
 const CANDIDATE_PAGE_SIZE = 100;
+const CANDIDATE_BATCH_PAGE_COUNT = 10;
+const CANDIDATE_BATCH_SIZE = CANDIDATE_PAGE_SIZE * CANDIDATE_BATCH_PAGE_COUNT;
 
-async function loadCandidatePage(page, shipTypes, bbox) {
+function chunkCandidateItems(items, startPage) {
+  const pages = [];
+  for (let index = 0; index < items.length; index += CANDIDATE_PAGE_SIZE) {
+    pages.push({
+      page: startPage + pages.length,
+      items: items.slice(index, index + CANDIDATE_PAGE_SIZE)
+    });
+  }
+  return pages;
+}
+
+async function loadCandidateBatch(batchIndex, shipTypes, bbox, trace) {
   const windowValue = multiTimeWindowParams();
   if (!windowValue) {
     throw new Error("多船时间范围无效");
@@ -1487,12 +2011,12 @@ async function loadCandidatePage(page, shipTypes, bbox) {
   const params = qs({
     ...windowValue,
     ...bbox,
-    page,
-    pageSize: CANDIDATE_PAGE_SIZE,
+    page: batchIndex,
+    pageSize: CANDIDATE_BATCH_SIZE,
     shipTypes: shipTypes.join(",")
   });
-  const data = await getJson(`/api/tracks/candidates?${params}`);
-  return { page, items: sortCandidateItems(data.items || []) };
+  const data = await getJson(`/api/tracks/candidates?${params}`, { trace });
+  return { batchIndex, items: sortCandidateItems(data.items || []) };
 }
 
 async function loadCandidates({ append = false } = {}) {
@@ -1500,6 +2024,7 @@ async function loadCandidates({ append = false } = {}) {
   if (state.multi.candidateLoading) {
     return;
   }
+  const requestSeq = ++state.multi.candidateLoadSeq;
   const startedAt = performance.now();
   const bbox = multiQueryBBox();
   const windowValue = multiTimeWindowParams();
@@ -1520,30 +2045,33 @@ async function loadCandidates({ append = false } = {}) {
     setStatus("请至少选择一种船舶类型");
     return;
   }
+  const trace = beginApiTrace("候选船舶");
   state.multi.candidateLoading = true;
   renderCandidateDrawer();
+  const batchIndex = append ? state.multi.candidateBatchCount + 1 : 1;
   const startPage = append ? state.multi.candidatePages.length + 1 : 1;
-  const pageCount = state.multi.candidateBatchPages;
-  setStatus(append ? `正在继续加载候选船舶第 ${startPage} 页` : "正在查询候选船舶");
+  setStatus(append ? `正在继续加载候选船舶第 ${batchIndex} 批` : "正在查询候选船舶");
   try {
     const nextPages = append
       ? state.multi.candidatePages.map((item) => ({ page: item.page, items: item.items.slice() }))
       : [];
-    const requests = [];
-    for (let page = startPage; page < startPage + pageCount; page += 1) {
-      requests.push(loadCandidatePage(page, shipTypes, bbox));
-    }
-    const results = await Promise.all(requests);
-    for (const result of results) {
-      const existingIndex = nextPages.findIndex((item) => item.page === result.page);
+    const result = await loadCandidateBatch(batchIndex, shipTypes, bbox, trace);
+    const batchPages = chunkCandidateItems(result.items || [], startPage);
+    for (const resultPage of batchPages) {
+      const existingIndex = nextPages.findIndex((item) => item.page === resultPage.page);
       if (existingIndex >= 0) {
-        nextPages[existingIndex] = result;
+        nextPages[existingIndex] = resultPage;
       } else {
-        nextPages.push(result);
+        nextPages.push(resultPage);
       }
+    }
+    if (requestSeq !== state.multi.candidateLoadSeq) {
+      return;
     }
     nextPages.sort((left, right) => left.page - right.page);
     state.multi.candidatePages = nextPages;
+    state.multi.candidateBatchCount = batchIndex;
+    state.multi.candidateHasMore = (result.items || []).length === CANDIDATE_BATCH_SIZE;
     state.multi.selectedShips = append ? state.multi.selectedShips.filter((id) => loadedCandidateItems().some((item) => item.shipId === id)) : [];
     state.multi.drawerVisible = true;
     state.multi.candidateCurrentPage = append ? Math.min(state.multi.candidateCurrentPage, state.multi.candidatePages.length) : 1;
@@ -1558,6 +2086,7 @@ async function loadCandidates({ append = false } = {}) {
   } finally {
     state.multi.candidateLoading = false;
     renderCandidateDrawer();
+    finishApiTrace(trace);
   }
 }
 
@@ -1565,18 +2094,22 @@ function selectCandidatePage(page) {
   const ids = multiSelectionFromPage(page);
   if (!ids.length) return;
   const trimmed = multiSelectionShipIds(ids);
-  state.multi.selectedTrackPoints = 0;
+  state.multi.selectedStatsSeq += 1;
+  state.multi.selectedRawTrackPoints = 0;
+  state.multi.selectedSampledTrackPoints = 0;
   renderCandidateDrawer();
-  if (trimmed) setStatus("已选中船舶达到上限，超出部分未纳入播放");
+  if (trimmed) setStatus(multiSelectionLimitMessage());
 }
 
 function selectLoadedCandidatePages() {
   const ids = loadedCandidateItems().map((item) => item.shipId);
   if (!ids.length) return;
   const trimmed = multiSelectionShipIds(ids);
-  state.multi.selectedTrackPoints = 0;
+  state.multi.selectedStatsSeq += 1;
+  state.multi.selectedRawTrackPoints = 0;
+  state.multi.selectedSampledTrackPoints = 0;
   renderCandidateDrawer();
-  if (trimmed) setStatus("已选中船舶达到上限，超出部分未纳入播放");
+  if (trimmed) setStatus(multiSelectionLimitMessage());
 }
 
 function gotoCandidatePage(delta) {
@@ -1606,7 +2139,6 @@ function drawBox() {
     state.multi.bbox = toQueryBBoxFromLngLat(sw, ne);
     resetMultiCandidates();
     renderCandidateDrawer();
-    scheduleMultiSummary(0);
     setStatus("框选完成，正在加载候选船舶");
     loadCandidates().catch((error) => showError(error.message));
   });
@@ -1623,67 +2155,116 @@ async function loadMultiTrack() {
     return;
   }
   setStatus("正在查询多船轨迹");
-  const bbox = state.multi.bbox || currentDataBBox();
   const windowValue = multiTimeWindowParams();
   if (!windowValue) {
     showError("多船时间范围无效");
     setStatus("多船时间范围无效");
     return;
   }
-  const data = await postJson("/api/tracks/multi", {
-    shipIds,
-    start: windowValue.start,
-    end: windowValue.end,
-    zoom: getMapZoom(),
-    bbox
-  });
-  state.trackPoints = data.items;
+  const trace = beginApiTrace("多船轨迹");
+  pausePlayback();
+  const statsSeq = ++state.multi.selectedStatsSeq;
+  state.trackPoints = [];
   state.playIndex = 0;
-  state.multi.selectedTrackPoints = state.trackPoints.length;
+  state.multi.selectedRawTrackPoints = 0;
+  state.multi.selectedSampledTrackPoints = 0;
   renderTracks();
   updateMetrics();
-  setStatus(`多船轨迹 ${state.trackPoints.length.toLocaleString()} 个抽稀点`);
-}
-
-async function playSelectedMultiTracks() {
-  switchMode("multi");
-  if (!state.multi.selectedShips.length) {
-    showError("请先选择候选船舶");
-    setStatus("请先选择候选船舶");
-    return;
-  }
-  if (!state.trackPoints.length || state.multi.selectedTrackPoints === 0) {
-    await loadMultiTrack();
-  }
-  state.playing = true;
   syncPlayButtons();
+  try {
+    const sampling = activeSamplingParams();
+    const data = await postJson("/api/tracks/multi", {
+      shipIds,
+      start: windowValue.start,
+      end: windowValue.end,
+      zoom: getMapZoom(),
+      samplingMode: sampling.samplingMode,
+      bucketSeconds: sampling.bucketSeconds
+    }, { trace });
+    state.trackPoints = data.items || [];
+    state.playIndex = 0;
+    renderTracks();
+    afterTrackRenderComplete(() => {
+      if (statsSeq !== state.multi.selectedStatsSeq) return;
+      state.multi.selectedSampledTrackPoints = state.trackPoints.length;
+      if (sampling.samplingMode === "raw") {
+        state.multi.selectedRawTrackPoints = state.trackPoints.length;
+        updateMetrics();
+      } else {
+        updateMetrics();
+        refreshSelectedMultiTrackPointStats(windowValue, shipIds, statsSeq).catch((error) => setStatus("多船统计刷新失败: " + error.message));
+      }
+    });
+    syncPlayButtons();
+    setStatus(`多船轨迹 ${state.trackPoints.length.toLocaleString()} 个${playbackPointLabel()}`);
+  } finally {
+    finishApiTrace(trace);
+  }
 }
 
 async function loadGlobalSegment() {
   switchMode("global");
-  setStatus("正在加载全域小时片段");
-  const start = new Date($("segment-start").value);
-  const end = new Date(start.getTime() + 60 * 60 * 1000);
-  const params = qs({ start: start.toISOString(), end: end.toISOString(), zoom: getMapZoom(), ...currentDataBBox() });
-  const data = await getJson(`/api/tracks/global-segment?${params}`);
-  state.trackPoints = [...state.trackPoints, ...data.items];
+  setStatus("正在加载全域回放");
+  const windowValue = globalWindowParams();
+  if (!windowValue) {
+    showError("全域时间范围无效");
+    setStatus("全域时间范围无效");
+    return;
+  }
+  const trace = beginApiTrace("全域回放");
+  pausePlayback();
+  const statsSeq = ++state.global.stats.statsSeq;
+  state.trackPoints = [];
   state.playIndex = 0;
+  state.global.stats.sampledTrackPoints = 0;
   renderTracks();
   updateMetrics();
-  setStatus(`已加载 ${toLocalDatetime(start)} - ${toLocalDatetime(end)}，${data.items.length.toLocaleString()} 点`);
+  syncPlayButtons();
+  try {
+    const sampling = activeSamplingParams();
+    const params = qs({
+      ...windowValue,
+      zoom: getMapZoom(),
+      samplingMode: sampling.samplingMode,
+      bucketSeconds: sampling.bucketSeconds
+    });
+    const data = await getJson(`/api/tracks/global-segment?${params}`, { trace });
+    state.trackPoints = data.items || [];
+    state.playIndex = 0;
+    renderTracks();
+    afterTrackRenderComplete(() => {
+      if (statsSeq !== state.global.stats.statsSeq) return;
+      state.global.stats.sampledTrackPoints = state.trackPoints.length;
+      updateMetrics();
+      scheduleGlobalSummary(0);
+    });
+    syncPlayButtons();
+    const end = new Date(windowValue.timePoint);
+    const start = new Date(end.getTime() - Number(windowValue.hours || 1) * 60 * 60 * 1000);
+    setStatus(`已加载 ${toLocalDatetime(start)} - ${toLocalDatetime(end)}，${(data.items || []).length.toLocaleString()} 个${playbackPointLabel()}`);
+  } finally {
+    finishApiTrace(trace);
+  }
 }
 
 function tickPlayer() {
   if (state.playing && state.trackPoints.length) {
-    state.playIndex = Math.min(state.trackPoints.length - 1, state.playIndex + state.speed);
-    $("progress").value = state.playIndex;
-    renderPlaybackMarkers();
-    if (state.playIndex >= state.trackPoints.length - 1) {
+    try {
+      state.playIndex = Math.min(state.trackPoints.length - 1, state.playIndex + 1);
+      $("progress").value = state.playIndex;
+      renderPlaybackMarkers();
+      if (state.playIndex >= state.trackPoints.length - 1) {
+        state.playing = false;
+        syncPlayButtons();
+      }
+    } catch (error) {
+      console.error("Playback tick failed", error);
       state.playing = false;
       syncPlayButtons();
     }
   }
-  setTimeout(tickPlayer, 400);
+  const speed = Math.max(1, Number(state.speed) || 1);
+  setTimeout(tickPlayer, Math.max(16, 400 / speed));
 }
 
 function createAmapTileLayer() {
@@ -1707,9 +2288,11 @@ function initMap() {
     : state.config.defaultCenter;
 
   state.layers.trackSource = new ol.source.Vector();
+  state.layers.playbackTrackSource = new ol.source.Vector();
   state.layers.markerSource = new ol.source.Vector();
   state.layers.rectangleSource = new ol.source.Vector();
   state.layers.trackLayer = new ol.layer.Vector({ source: state.layers.trackSource, zIndex: 30 });
+  state.layers.playbackTrackLayer = new ol.layer.Vector({ source: state.layers.playbackTrackSource, zIndex: 31 });
   state.layers.markerLayer = new ol.layer.Vector({ source: state.layers.markerSource, zIndex: 40 });
   state.layers.rectangleLayer = new ol.layer.Vector({
     source: state.layers.rectangleSource,
@@ -1719,7 +2302,7 @@ function initMap() {
 
   state.map = new ol.Map({
     target: "map",
-    layers: [createAmapTileLayer(), state.layers.trackLayer, state.layers.rectangleLayer, state.layers.markerLayer],
+    layers: [createAmapTileLayer(), state.layers.trackLayer, state.layers.playbackTrackLayer, state.layers.rectangleLayer, state.layers.markerLayer],
     view: new ol.View({
       center: ol.proj.fromLonLat(center),
       zoom: state.config.defaultZoom
@@ -1745,6 +2328,8 @@ function initMap() {
 
 async function init() {
   try {
+    state.apiTrace.hidden = loadApiTraceHidden();
+    $("api-trace-toggle").onclick = () => setApiTraceHidden(false);
     state.config = await getJson("/api/config/map");
     initMap();
     document.addEventListener("click", handleRealtimeDomClick, true);
@@ -1753,11 +2338,13 @@ async function init() {
       scheduleRealtimeRender(50);
     }, { passive: true });
     bindEvents();
+    refreshDatabaseStats().catch(() => {});
     await loadLatest().catch((error) => {
       showError(error.message);
       setStatus("Database is unavailable; map page loaded");
     });
     connectWebSocket();
+    syncSamplingControls();
     tickPlayer();
   } catch (error) {
     showError(error.message);
@@ -1812,7 +2399,6 @@ function bindEvents() {
     }
   };
   $("load-single").onclick = () => loadSingleTrack().catch((error) => showError(error.message));
-  $("exit-single-track").onclick = () => exitSingleTrack();
   $("single-point").onchange = () => {
     if (state.mode === "single") {
       loadSingleTrack().catch((error) => showError(error.message));
@@ -1828,7 +2414,22 @@ function bindEvents() {
       loadSingleTrack().catch((error) => showError(error.message));
     }
   };
+  $("track-sampling-mode").onchange = () => {
+    syncSamplingControls();
+    if (["single", "multi", "global"].includes(state.mode)) {
+      reloadActivePlaybackTrack().catch((error) => showError(error.message));
+    }
+  };
+  $("track-sampling-bucket").onchange = () => {
+    syncSamplingControls();
+    if (state.mode === "single" || state.mode === "multi" || state.mode === "global") {
+      if (state.sampling.mode === "manual") {
+        reloadActivePlaybackTrack().catch((error) => showError(error.message));
+      }
+    }
+  };
   $("draw-box").onclick = drawBox;
+  $("clear-box").onclick = clearMultiBBoxAndCandidates;
   $("candidate-type-ais").onchange = () => {
     if (state.mode === "multi") {
       loadCandidates().catch((error) => showError(error.message));
@@ -1852,7 +2453,7 @@ function bindEvents() {
   $("candidate-select-loaded").onclick = () => {
     if (state.mode === "multi") selectLoadedCandidatePages();
   };
-  $("candidate-play").onclick = () => playSelectedMultiTracks().catch((error) => showError(error.message));
+  $("candidate-load-track").onclick = () => loadMultiTrack().catch((error) => showError(error.message));
   $("candidate-close").onclick = () => {
     state.multi.drawerVisible = false;
     renderCandidateDrawer();
@@ -1862,26 +2463,27 @@ function bindEvents() {
     renderCandidateDrawer();
   };
   $("load-global").onclick = () => loadGlobalSegment().catch((error) => showError(error.message));
-  $("clear-global").onclick = () => {
-    state.trackPoints = [];
-    state.playIndex = 0;
-    renderTracks();
-    updateMetrics();
+  $("global-point").onchange = () => {
+    if (state.mode === "global") {
+      scheduleGlobalSummary(0);
+    }
   };
+  $("global-hours").onchange = () => {
+    if (state.mode === "global") {
+      scheduleGlobalSummary(0);
+    }
+  };
+  $("exit-playback").onclick = () => exitPlayback();
   $("play").onclick = togglePlayback;
-  $("stop").onclick = () => {
-    state.playing = false;
-    state.playIndex = 0;
-    syncPlayButtons();
-    renderPlaybackMarkers();
-  };
   $("speed").onchange = () => {
     state.speed = Number($("speed").value);
+    syncPlayButtons();
   };
   $("progress").oninput = () => {
     state.playIndex = Number($("progress").value);
     renderPlaybackMarkers();
   };
+  syncPlayButtons();
 }
 
 init();

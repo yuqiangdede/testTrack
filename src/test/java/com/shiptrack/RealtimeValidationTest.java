@@ -4,7 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.shiptrack.config.ShipConfigService;
 import com.shiptrack.config.ShipTrackConfig;
 import com.shiptrack.realtime.RealtimeService;
@@ -30,6 +29,26 @@ class RealtimeValidationTest {
   }
 
   @Test
+  void buildsGlobalWindowFromPointAndHours() {
+    RealtimeService service = service();
+    assertThat(service.globalWindowFromParams("2026-04-17T09:00:00.000Z", "2"))
+        .satisfies(window -> {
+          assertThat(window.start()).isEqualTo("2026-04-17 15:00:00");
+          assertThat(window.end()).isEqualTo("2026-04-17 17:00:00");
+        });
+  }
+
+  @Test
+  void defaultsGlobalWindowHoursToConfiguredValue() {
+    RealtimeService service = service();
+    assertThat(service.globalWindowFromParams("2026-04-17T09:00:00.000Z", null))
+        .satisfies(window -> {
+          assertThat(window.start()).isEqualTo("2026-04-17 16:00:00");
+          assertThat(window.end()).isEqualTo("2026-04-17 17:00:00");
+        });
+  }
+
+  @Test
   void rejectsInvalidTimeWindowRange() {
     RealtimeService service = service();
     assertThatThrownBy(() -> service.validateTimeWindow("2026-04-17T01:00:00.000Z", "2026-04-17T00:00:00.000Z"))
@@ -46,6 +65,14 @@ class RealtimeValidationTest {
   }
 
   @Test
+  void rejectsInvalidGlobalReplayHours() {
+    RealtimeService service = service();
+    assertThatThrownBy(() -> service.globalWindowFromParams("2026-04-17T01:00:00.000Z", "0"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("global replay hours is invalid");
+  }
+
+  @Test
   void validatesZoomRange() {
     RealtimeService service = service();
     assertThat(service.validateZoom("8")).isEqualTo(8);
@@ -57,6 +84,6 @@ class RealtimeValidationTest {
   private RealtimeService service() {
     ShipConfigService configService = mock(ShipConfigService.class);
     org.mockito.Mockito.when(configService.config()).thenReturn(new ShipTrackConfig());
-    return new RealtimeService(mock(TrackRepository.class), configService, new ObjectMapper());
+    return new RealtimeService(mock(TrackRepository.class), configService);
   }
 }

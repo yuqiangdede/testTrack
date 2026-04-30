@@ -43,8 +43,8 @@ public class ShipTrackConfig {
   public static class Query {
     public int latestLookbackHours = 5;
     public int realtimeWindowMinutes = 10;
-    public int realtimePollSeconds = 5;
     public int clickhouseTimeoutSeconds = 30;
+    public boolean logSql = true;
     public int latestPageSize = 30000;
     public int maxLatestShips = 300000;
     public int realtimeCacheMaxShips = 1000000;
@@ -52,7 +52,8 @@ public class ShipTrackConfig {
     public int maxDensityCells = 30000;
     public int maxTrackPointsPerShip = 3000;
     public int maxSingleTrackPoints = 1200;
-    public int maxMultiShips = 100;
+    public int maxMultiShips = 1000;
+    public int maxCandidateBatchSize = 1000;
     public int maxGlobalSegmentPoints = 50000;
     public int globalSegmentHours = 1;
     public int logMemorySeconds = 0;
