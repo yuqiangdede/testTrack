@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
@@ -35,10 +35,12 @@
             <section class="panel-section">
               <h2 id="panel-title">实时位置展示</h2>
               <div class="metric-grid">
-                <div class="metric"><span>最新船位</span><strong id="metric-latest">0</strong></div>
-                <div class="metric"><span>热力网格</span><strong id="metric-density">0</strong></div>
-                <div class="metric"><span>轨迹点</span><strong id="metric-track">0</strong></div>
-                <div class="metric"><span>轨迹船舶</span><strong id="metric-ships">0</strong></div>
+                <div class="metric"><span>数据库轨迹点总量</span><strong id="metric-db-points">0</strong></div>
+                <div class="metric"><span>数据库船舶总量</span><strong id="metric-db-ships">0</strong></div>
+                <div class="metric"><span>当前时间窗轨迹点总量</span><strong id="metric-window-points">0</strong></div>
+                <div class="metric"><span>当前时间窗船舶总量</span><strong id="metric-window-ships">0</strong></div>
+                <div class="metric"><span>内存缓存船舶总量</span><strong id="metric-memory-ships">0</strong></div>
+                <div class="metric"><span>当前视野船舶数量</span><strong id="metric-viewport-ships">0</strong></div>
               </div>
             </section>
             <section id="time-section" class="panel-section hidden">
@@ -108,3 +110,4 @@
     <script src="/app.js"></script>
   </body>
 </html>
+

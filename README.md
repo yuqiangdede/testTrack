@@ -72,34 +72,6 @@ http://127.0.0.1:3001
 
 实时最新船位接口继续返回 compact 结构：`fields` 描述字段顺序，`items` 为二维数组，顺序为 `shipId, shipName, lng, lat, speed, heading, time, isAis`。
 
-## 回填命令
-
-默认 dry-run，不写入数据：
-
-```powershell
-java -jar target/ship-situation-replay-0.1.0.jar backfill
-```
-
-执行写入：
-
-```powershell
-java -jar target/ship-situation-replay-0.1.0.jar backfill --execute
-```
-
-可选参数：
-
-```text
---resume
---target-start=2026-01-07
---target-days=100
---batch-days=5
---reserve-gib=20
---safety-factor=1.2
---host-drive=D
-```
-
-回填会先检查源窗口、目标区间、ClickHouse 表大小和磁盘余量。目标区间已有数据时默认中止；确认需要补齐缺失日期时再使用 `--resume`。
-
 ## 可选索引
 
 `db/optional-indexes.sql` 仅提供 ClickHouse 跳数索引 SQL，不会自动执行。建议先确认应用功能正常，再使用 `db/explain-queries.sql` 对比查询计划，并在低峰维护窗口人工执行索引和物化操作。

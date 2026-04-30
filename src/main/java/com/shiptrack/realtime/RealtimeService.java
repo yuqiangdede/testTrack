@@ -22,7 +22,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
@@ -30,7 +29,6 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 
 @Service
-@ConditionalOnProperty(name = "ship.mode", havingValue = "server", matchIfMissing = true)
 public class RealtimeService {
   private static final List<String> COMPACT_FIELDS = List.of("shipId", "shipName", "lng", "lat", "speed", "heading", "time", "isAis");
   private static final DateTimeFormatter LOCAL_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
@@ -91,19 +89,25 @@ public class RealtimeService {
     return new TimeWindow(startDate.format(LOCAL_FORMAT), endDate.format(LOCAL_FORMAT));
   }
 
+  public int cachedShipCount() {
+    synchronized (lock) {
+      return items.size();
+    }
+  }
+
   public Map<String, Object> latestResponse(TimeWindow timeWindow) {
     if (timeWindow.start().isBlank() || timeWindow.end().isBlank()) {
-      return compactLatest("clickhouse", false, timeWindow, "", List.of(), false);
+      return compactLatest("clickhouse", false, timeWindow, "", List.of(), false, cachedShipCount());
     }
     synchronized (lock) {
       if (ready && sameWindow(window, timeWindow)) {
-        return compactLatest("memory", true, window, watermark, rows, false);
+        return compactLatest("memory", true, window, watermark, rows, false, cachedShipCount());
       }
     }
     warmLatestCache(timeWindow);
     synchronized (lock) {
       if (ready && sameWindow(window, timeWindow)) {
-        return compactLatest("memory", true, window, watermark, rows, false);
+        return compactLatest("memory", true, window, watermark, rows, false, cachedShipCount());
       }
     }
     List<Map<String, Object>> fallback = repository.latest("", config.query.maxLatestShips, null, false, timeWindow.start(), timeWindow.end());
@@ -113,7 +117,7 @@ public class RealtimeService {
         .orElse("");
     List<List<Object>> fallbackRows = fallback.stream().map(this::pointToRealtimeRow).toList();
     synchronized (lock) {
-      return compactLatest("clickhouse", false, timeWindow, fallbackWatermark, fallbackRows, warming);
+      return compactLatest("clickhouse", false, timeWindow, fallbackWatermark, fallbackRows, warming, cachedShipCount());
     }
   }
 
@@ -271,7 +275,7 @@ public class RealtimeService {
         toDouble(item.getOrDefault("isAis", 0)));
   }
 
-  private Map<String, Object> compactLatest(String source, boolean ready, TimeWindow timeWindow, String watermark, List<List<Object>> itemRows, boolean warming) {
+  private Map<String, Object> compactLatest(String source, boolean ready, TimeWindow timeWindow, String watermark, List<List<Object>> itemRows, boolean warming, int memoryShips) {
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("source", source);
     body.put("compact", true);
@@ -282,6 +286,7 @@ public class RealtimeService {
     }
     body.put("window", timeWindow);
     body.put("watermark", watermark);
+    body.put("memoryShips", memoryShips);
     body.put("items", itemRows);
     body.put("nextCursor", "");
     body.put("hasMore", false);

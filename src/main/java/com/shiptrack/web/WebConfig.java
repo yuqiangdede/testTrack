@@ -1,14 +1,12 @@
 package com.shiptrack.web;
 
 import com.shiptrack.config.ShipConfigService;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 @Configuration
-@ConditionalOnProperty(name = "ship.mode", havingValue = "server", matchIfMissing = true)
 public class WebConfig implements WebMvcConfigurer {
   private final ShipConfigService configService;
 

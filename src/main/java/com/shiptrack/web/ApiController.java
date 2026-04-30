@@ -51,12 +51,34 @@ public class ApiController {
     return realtimeService.latestResponse(timeWindow);
   }
 
+  @GetMapping("/api/stats/realtime-summary")
+  public Map<String, Object> realtimeSummary(@RequestParam(required = false) String start, @RequestParam(required = false) String end) {
+    TimeWindow timeWindow = realtimeService.realtimeWindowFromParams(start, end);
+    Map<String, Object> database = repository.databaseStats();
+    Map<String, Object> window = timeWindow.start().isBlank() || timeWindow.end().isBlank()
+        ? Map.of("trackPoints", 0L, "ships", 0L)
+        : repository.windowStats(timeWindow.start(), timeWindow.end());
+    return Map.of(
+        "databaseTrackPoints", database.get("trackPoints"),
+        "databaseShips", database.get("ships"),
+        "windowTrackPoints", window.get("trackPoints"),
+        "windowShips", window.get("ships"));
+  }
+
   @GetMapping("/api/analysis/density")
   public Map<String, Object> density(@RequestParam String start, @RequestParam String end, @RequestParam String west,
       @RequestParam String south, @RequestParam String east, @RequestParam String north, @RequestParam(required = false) String zoom) {
     TimeWindow time = realtimeService.validateTimeWindow(start, end);
     BBox bbox = bbox(west, south, east, north);
     return Map.of("items", repository.density(time.start(), time.end(), bbox, realtimeService.validateZoom(zoom)));
+  }
+
+  @GetMapping("/api/stats/viewport")
+  public Map<String, Object> viewportStats(@RequestParam String start, @RequestParam String end, @RequestParam String west,
+      @RequestParam String south, @RequestParam String east, @RequestParam String north) {
+    TimeWindow time = realtimeService.validateTimeWindow(start, end);
+    BBox bbox = bbox(west, south, east, north);
+    return Map.of("viewportShips", repository.viewportShips(time.start(), time.end(), bbox));
   }
 
   @GetMapping("/api/tracks/single")

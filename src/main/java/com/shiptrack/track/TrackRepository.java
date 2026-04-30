@@ -83,6 +83,39 @@ public class TrackRepository {
     return clickHouse.query(query, params);
   }
 
+  public Map<String, Object> databaseStats() {
+    ShipTrackConfig.Columns c = config.columns;
+    Map<String, Object> row = clickHouse.queryOne("""
+        SELECT
+          count() AS trackPoints,
+          uniqCombined64(%s) AS ships
+        FROM %s
+        """.formatted(ident(c.shipId), ident(config.tables.track)));
+    return Map.of(
+        "trackPoints", toLong(row.get("trackPoints")),
+        "ships", toLong(row.get("ships")));
+  }
+
+  public Map<String, Object> windowStats(String start, String end) {
+    ShipTrackConfig.Columns c = config.columns;
+    List<Map<String, Object>> rows = clickHouse.query("""
+        SELECT
+          count() AS trackPoints,
+          uniqCombined64(%s) AS ships
+        FROM %s
+        WHERE %s >= %s
+          AND %s < %s
+        """.formatted(
+        ident(c.shipId),
+        ident(config.tables.track),
+        ident(c.eventTime), sqlDateParam("start"),
+        ident(c.eventTime), sqlDateParam("end")), params("start", start, "end", end));
+    Map<String, Object> row = rows.isEmpty() ? Map.of() : rows.get(0);
+    return Map.of(
+        "trackPoints", toLong(row.get("trackPoints")),
+        "ships", toLong(row.get("ships")));
+  }
+
   public String watermark() {
     ShipTrackConfig.Columns c = config.columns;
     Map<String, Object> row = clickHouse.queryOne("SELECT toString(max(%s)) AS time FROM %s".formatted(ident(c.eventTime), ident(config.tables.track)));
@@ -159,6 +192,34 @@ public class TrackRepository {
     Map<String, Object> params = params("start", start, "end", end, "grid", grid, "limit", config.query.maxDensityCells);
     putBbox(params, bbox);
     return clickHouse.query(query, params);
+  }
+
+  public long totalTrackPoints() {
+    Map<String, Object> row = clickHouse.queryOne("SELECT count() AS points FROM %s".formatted(ident(config.tables.track)));
+    return toLong(row.get("points"));
+  }
+
+  public long viewportShips(String start, String end, BBox bbox) {
+    ShipTrackConfig.Columns c = config.columns;
+    String query = """
+        SELECT
+          uniqCombined64(%s) AS ships
+        FROM %s
+        WHERE %s >= %s
+          AND %s < %s
+          AND %s BETWEEN {west: Float64} AND {east: Float64}
+          AND %s BETWEEN {south: Float64} AND {north: Float64}
+        """.formatted(
+        ident(c.shipId),
+        ident(config.tables.track),
+        ident(c.eventTime), sqlDateParam("start"),
+        ident(c.eventTime), sqlDateParam("end"),
+        ident(c.longitude),
+        ident(c.latitude));
+    List<Map<String, Object>> rows = clickHouse.query(query, params("start", start, "end", end,
+        "west", bbox.west(), "south", bbox.south(), "east", bbox.east(), "north", bbox.north()));
+    Map<String, Object> row = rows.isEmpty() ? Map.of() : rows.get(0);
+    return toLong(row.get("ships"));
   }
 
   public List<Map<String, Object>> candidates(String start, String end, BBox bbox, int limit) {
@@ -361,5 +422,16 @@ public class TrackRepository {
     params.put("south", bbox.south());
     params.put("east", bbox.east());
     params.put("north", bbox.north());
+  }
+
+  private long toLong(Object value) {
+    if (value instanceof Number number) {
+      return number.longValue();
+    }
+    if (value == null) {
+      return 0;
+    }
+    String text = String.valueOf(value);
+    return text.isBlank() ? 0 : Long.parseLong(text);
   }
 }

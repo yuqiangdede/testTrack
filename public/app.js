@@ -11,6 +11,18 @@ const state = {
   playing: false,
   playIndex: 0,
   speed: 2,
+  stats: {
+    databaseTrackPoints: 0,
+    databaseShips: 0,
+    windowTrackPoints: 0,
+    windowShips: 0,
+    memoryShips: 0,
+    viewportShips: 0,
+    summaryTimer: null,
+    viewportTimer: null,
+    summarySeq: 0,
+    viewportSeq: 0
+  },
   layers: {
     heat: null,
     trackSource: null,
@@ -34,6 +46,7 @@ const state = {
     realtimeHits: [],
     realtimeHitGrid: new Map(),
     realtimeVisibleCount: 0,
+    realtimeConfirmShipId: "",
     markers: [],
     rectangle: null
   },
@@ -287,6 +300,7 @@ function buildRealtimeStore(items) {
   });
   state.realtimeStore = store;
   state.latest = store.items;
+  state.stats.memoryShips = store.items.length;
 }
 
 function upsertRealtimeItems(items) {
@@ -316,6 +330,7 @@ function upsertRealtimeItems(items) {
     }
   }
   state.latest = state.realtimeStore.items;
+  state.stats.memoryShips = state.realtimeStore.items.length;
 }
 
 function queryVisibleShipIndices() {
@@ -413,14 +428,78 @@ function matchesRealtimeType(item) {
   return true;
 }
 
+function metricNumber(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number.toLocaleString() : "0";
+}
+
 function updateMetrics() {
-  $("metric-latest").textContent = state.latest.length.toLocaleString();
-  $("metric-density").textContent = state.density.length.toLocaleString();
-  $("metric-track").textContent = state.trackPoints.length.toLocaleString();
-  $("metric-ships").textContent = groupByShip(state.trackPoints).size.toLocaleString();
+  $("metric-db-points").textContent = metricNumber(state.stats.databaseTrackPoints);
+  $("metric-db-ships").textContent = metricNumber(state.stats.databaseShips);
+  $("metric-window-points").textContent = metricNumber(state.stats.windowTrackPoints);
+  $("metric-window-ships").textContent = metricNumber(state.stats.windowShips);
+  $("metric-memory-ships").textContent = metricNumber(state.stats.memoryShips);
+  $("metric-viewport-ships").textContent = metricNumber(state.stats.viewportShips);
   $("progress").max = Math.max(0, state.trackPoints.length - 1);
   $("progress").value = state.playIndex;
   $("active-time").textContent = state.trackPoints[state.playIndex]?.time || "--";
+}
+
+function activeStatsWindow() {
+  if (state.mode === "realtime") {
+    const start = $("realtime-start")?.value;
+    const end = $("realtime-end")?.value;
+    if (start && end) return { start: toIso(start), end: toIso(end) };
+    if (state.realtimeWindow?.start && state.realtimeWindow?.end) {
+      return { start: new Date(String(state.realtimeWindow.start).replace(" ", "T")).toISOString(), end: new Date(String(state.realtimeWindow.end).replace(" ", "T")).toISOString() };
+    }
+  }
+  const start = $("start")?.value;
+  const end = $("end")?.value;
+  if (!start || !end) return null;
+  return { start: toIso(start), end: toIso(end) };
+}
+
+async function refreshViewportStats() {
+  const bbox = currentDataBBox();
+  const windowValue = activeStatsWindow();
+  if (!bbox || !windowValue) return;
+  const seq = ++state.stats.viewportSeq;
+  const params = qs({ ...windowValue, ...bbox });
+  const data = await getJson(`/api/stats/viewport?${params}`);
+  if (seq !== state.stats.viewportSeq) return;
+  state.stats.viewportShips = Number(data.viewportShips || 0);
+  updateMetrics();
+}
+
+async function refreshRealtimeSummary() {
+  const windowValue = activeStatsWindow();
+  if (!windowValue) return;
+  const seq = ++state.stats.summarySeq;
+  const params = qs(windowValue);
+  const data = await getJson(`/api/stats/realtime-summary?${params}`);
+  if (seq !== state.stats.summarySeq) return;
+  state.stats.databaseTrackPoints = Number(data.databaseTrackPoints || 0);
+  state.stats.databaseShips = Number(data.databaseShips || 0);
+  state.stats.windowTrackPoints = Number(data.windowTrackPoints || 0);
+  state.stats.windowShips = Number(data.windowShips || 0);
+  updateMetrics();
+}
+
+function scheduleViewportStats(delay = 260) {
+  if (state.stats.viewportTimer) clearTimeout(state.stats.viewportTimer);
+  state.stats.viewportTimer = setTimeout(() => {
+    state.stats.viewportTimer = null;
+    refreshViewportStats().catch((error) => setStatus("统计刷新失败: " + error.message));
+  }, delay);
+}
+
+function scheduleRealtimeSummary(delay = 260) {
+  if (state.stats.summaryTimer) clearTimeout(state.stats.summaryTimer);
+  state.stats.summaryTimer = setTimeout(() => {
+    state.stats.summaryTimer = null;
+    refreshRealtimeSummary().catch((error) => setStatus("统计刷新失败: " + error.message));
+  }, delay);
 }
 
 function switchMode(mode) {
@@ -442,6 +521,7 @@ function switchMode(mode) {
   if (mode === "realtime") renderRealtime();
   if (mode === "analysis") renderHeat();
   if (["single", "multi", "global"].includes(mode)) renderTracks();
+  scheduleViewportStats(0);
 }
 
 function clearLayers() {
@@ -457,7 +537,10 @@ function clearLayers() {
   state.layers.trackSource?.clear();
   state.layers.markerSource?.clear();
   if (state.mode !== "multi") state.layers.rectangleSource?.clear();
-  if (state.mode !== "realtime") clearRealtimeCanvas();
+  if (state.mode !== "realtime") {
+    clearRealtimeShipConfirm();
+    clearRealtimeCanvas();
+  }
   state.layers.lines = [];
   state.layers.markers = [];
 }
@@ -687,6 +770,7 @@ function hitTestShip(pixel) {
 
 function handleRealtimePointerMove(event) {
   if (state.mode !== "realtime") return;
+  if (state.layers.realtimeConfirmShipId) return;
   const ship = hitTestShip(event.pixel);
   if (ship) showShipInfo(ship);
   else if (state.layers.hoverShipId) hideShipInfo();
@@ -695,11 +779,12 @@ function handleRealtimePointerMove(event) {
 function handleRealtimeClick(event) {
   if (state.mode !== "realtime") return;
   const ship = hitTestShip(event.pixel);
-  if (ship) selectRealtimeShip(ship.shipId, ship.shipName || ship.shipId);
+  if (ship) showRealtimeShipConfirm(ship);
 }
 
 function handleRealtimeDomClick(event) {
   if (state.mode !== "realtime") return;
+  if (event.target.closest?.("#ship-hover-card")) return;
   const mapEl = $("map");
   if (!mapEl) return;
   const rect = mapEl.getBoundingClientRect();
@@ -710,7 +795,7 @@ function handleRealtimeDomClick(event) {
   if (!ship) return;
   event.preventDefault();
   event.stopPropagation();
-  selectRealtimeShip(ship.shipId, ship.shipName || ship.shipId);
+  showRealtimeShipConfirm(ship);
 }
 
 function showShipInfo(data) {
@@ -751,12 +836,64 @@ function showShipInfo(data) {
 }
 
 function hideShipInfo() {
+  if (state.layers.realtimeConfirmShipId) return;
   state.layers.hoverShipId = "";
   $("ship-hover-card")?.classList.add("hidden");
 }
 
+function clearRealtimeShipConfirm() {
+  state.layers.realtimeConfirmShipId = "";
+  state.layers.hoverShipId = "";
+  const card = $("ship-hover-card");
+  card?.classList.remove("confirm");
+  card?.classList.add("hidden");
+}
+
+function showRealtimeShipConfirm(data) {
+  if (!state.map) return;
+  data = normalizeShipInfoData(data);
+  state.layers.hoverShipId = data.id;
+  state.layers.realtimeConfirmShipId = data.id;
+  const typeText = Number(data.isAis) === 1 ? "AIS" : "Radar";
+  const card = $("ship-hover-card");
+  card.innerHTML = `
+    <div class="ship-info">
+      <strong>${escapeHtml(data.name || data.id)}</strong>
+      <div>编号：${escapeHtml(data.id)}</div>
+      <div>类型：${typeText}</div>
+      <div>航速：${escapeHtml(data.speed ?? "--")}</div>
+      <div>航向：${escapeHtml(data.heading ?? "--")}</div>
+      <div>时间：${escapeHtml(data.time || "--")}</div>
+      <div class="ship-info-actions">
+        <button type="button" id="confirm-single-track" class="primary">确认接入单船轨迹</button>
+        <button type="button" id="cancel-single-track">取消</button>
+      </div>
+    </div>
+  `;
+  card.classList.add("confirm");
+  card.classList.remove("hidden");
+  const position = Array.isArray(data.lnglat) ? data.lnglat : [data.mapLng, data.mapLat];
+  const pixel = state.map.getPixelFromCoordinate(ol.proj.fromLonLat(position));
+  if (pixel) {
+    card.style.left = `${Math.round(pixel[0] + 14)}px`;
+    card.style.top = `${Math.round(pixel[1] + 14)}px`;
+  }
+  $("confirm-single-track").onclick = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    selectRealtimeShip(data.id, data.name || data.id);
+  };
+  $("cancel-single-track").onclick = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    clearRealtimeShipConfirm();
+  };
+  setStatus(`已选中 ${data.name || data.id}，确认后查询单船轨迹`);
+}
+
 async function selectRealtimeShip(shipId, shipName) {
   if (!shipId) return;
+  clearRealtimeShipConfirm();
   $("ship-id").value = shipId;
   setStatus(`已选中 ${shipName || shipId}，正在查询单船轨迹`);
   switchMode("single");
@@ -859,6 +996,7 @@ async function loadLatest() {
   syncRealtimeWindowInputs(data.window);
   state.realtimeWindow = data.window || null;
   buildRealtimeStore(normalizeRealtimeItems(data));
+  state.stats.memoryShips = Number(data.memoryShips ?? state.latest.length ?? 0);
   const maxTime = state.latest.reduce((max, item) => (item.time > max ? item.time : max), "");
   if (maxTime) {
     const end = new Date(maxTime.replace(" ", "T"));
@@ -869,6 +1007,8 @@ async function loadLatest() {
   }
   renderRealtime();
   updateMetrics();
+  scheduleRealtimeSummary(0);
+  scheduleViewportStats(0);
   const sourceText = data.source === "memory" ? "内存缓存" : "数据库查询";
   setStatus(`${sourceText}已加载 ${state.latest.length.toLocaleString()} 条最新船位`);
 }
@@ -881,6 +1021,7 @@ async function loadDensity() {
   state.density = data.items;
   renderHeat();
   updateMetrics();
+  scheduleViewportStats(0);
   setStatus(`密度网格 ${state.density.length.toLocaleString()} 个`);
 }
 
@@ -1036,8 +1177,14 @@ function initMap() {
 
   state.map.on("movestart", syncRealtimeCanvasDuringMove);
   state.map.on("pointerdrag", syncRealtimeCanvasDuringMove);
-  state.map.on("moveend", () => scheduleRealtimeRender());
-  state.map.getView().on("change:resolution", () => scheduleRealtimeRender());
+  state.map.on("moveend", () => {
+    scheduleRealtimeRender();
+    scheduleViewportStats();
+  });
+  state.map.getView().on("change:resolution", () => {
+    scheduleRealtimeRender();
+    scheduleViewportStats();
+  });
   state.map.on("pointermove", handleRealtimePointerMove);
   state.map.on("click", handleRealtimeClick);
   $("map").addEventListener("mouseleave", hideShipInfo);
@@ -1051,6 +1198,7 @@ async function init() {
     window.addEventListener("resize", () => {
       state.map.updateSize();
       scheduleRealtimeRender(50);
+      scheduleViewportStats(80);
     }, { passive: true });
     bindEvents();
     await loadLatest().catch((error) => {
@@ -1072,6 +1220,7 @@ function connectWebSocket() {
       if (payload.window && state.realtimeWindow && !sameWindow(payload.window, state.realtimeWindow)) return;
       upsertRealtimeItems(payload.items || []);
       scheduleRealtimeRender(16);
+      scheduleViewportStats(500);
       updateMetrics();
       setStatus(`WebSocket pushed ${payload.items.length} ships`);
     }
@@ -1091,6 +1240,14 @@ function bindEvents() {
     }
   };
   $("load-density").onclick = () => loadDensity().catch((error) => showError(error.message));
+  $("start").onchange = () => {
+    scheduleRealtimeSummary(0);
+    scheduleViewportStats(0);
+  };
+  $("end").onchange = () => {
+    scheduleRealtimeSummary(0);
+    scheduleViewportStats(0);
+  };
   $("load-single").onclick = () => loadSingleTrack().catch((error) => showError(error.message));
   $("draw-box").onclick = drawBox;
   $("load-candidates").onclick = () => loadCandidates().catch((error) => showError(error.message));

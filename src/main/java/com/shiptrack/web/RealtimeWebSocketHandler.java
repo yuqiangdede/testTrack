@@ -2,7 +2,6 @@ package com.shiptrack.web;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.shiptrack.realtime.RealtimeService;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
@@ -10,7 +9,6 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 @Component
-@ConditionalOnProperty(name = "ship.mode", havingValue = "server", matchIfMissing = true)
 public class RealtimeWebSocketHandler extends TextWebSocketHandler {
   private final RealtimeService realtimeService;
   private final ObjectMapper objectMapper;
