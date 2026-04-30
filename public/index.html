@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>船舶态势与轨迹回放</title>
+    <link rel="stylesheet" href="/vendor/openlayers/ol.css" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -11,7 +12,7 @@
       <aside class="sidebar">
         <div class="brand">
           <strong>船舶态势</strong>
-          <span>AMap + ClickHouse</span>
+          <span>OpenLayers + ClickHouse</span>
         </div>
         <button class="nav active" data-mode="realtime"><span></span>实时位置</button>
         <button class="nav" data-mode="analysis"><span></span>态势分析</button>
@@ -103,6 +104,7 @@
         </section>
       </main>
     </div>
+    <script src="/vendor/openlayers/ol.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

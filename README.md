@@ -1,70 +1,105 @@
 # 船舶态势与轨迹回放
 
-基于高德地图 AMap JS API 与 ClickHouse 的船舶态势展示、热力分析和轨迹回放模块。
+基于 OpenLayers、Java Spring Boot 和 ClickHouse 的船舶态势展示、热力分析和轨迹回放服务。前端静态文件位于 `public/`，后端提供 HTTP API、静态资源服务和 `/ws/realtime` 实时 WebSocket 推送。
 
-## 运行
+## 环境要求
 
-当前项目为零 npm 依赖实现，不需要执行 `npm install`。
+- Java 17 或更高版本。
+- Maven 3.6.3 或更高版本。
+- ClickHouse HTTP 服务可访问。
 
-1. 复制环境变量示例：
+当前项目默认可整体迁移。配置、前端资源、SQL 辅助文件都位于项目目录内；日志、构建产物和本机私有配置不纳入版本库。
+
+## 配置
+
+复制环境变量示例：
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-2. 编辑 `.env`，填写高德 Web JS API Key、ClickHouse 连接和账号信息：
+编辑 `.env`：
 
 ```text
-VITE_AMAP_KEY=你的高德 Web JS API Key
-VITE_AMAP_SECURITY_JS_CODE=如启用安全密钥则填写
+PORT=3001
 CLICKHOUSE_JDBC_URL=jdbc:clickhouse://127.0.0.1:8123/default
 CLICKHOUSE_USER=default
-CLICKHOUSE_PASSWORD=你的 ClickHouse 密码
+CLICKHOUSE_PASSWORD=
 ```
 
-3. 启动服务：
+ClickHouse 表名、字段名、查询上限、地图默认中心点等配置位于 `config/ship-track.config.json`。
+
+前端使用项目内 `public/vendor/openlayers/` 中的 OpenLayers 文件，不需要高德 Web JS API Key。默认底图使用高德 XYZ 瓦片 `webrd01-04.is.autonavi.com/appmaptile`。
+
+## 运行
+
+开发运行：
 
 ```powershell
-npm start
+mvn spring-boot:run
 ```
 
-4. 浏览器访问：
+打包：
+
+```powershell
+mvn package
+```
+
+运行打包产物：
+
+```powershell
+java -jar target/ship-situation-replay-0.1.0.jar
+```
+
+浏览器访问：
 
 ```text
 http://127.0.0.1:3001
 ```
 
-## 配置
+## API
 
-ClickHouse 连接、表名、字段名、坐标字段、时间字段、船舶编号字段、航速字段、航向字段都在 `config/ship-track.config.json` 中配置。
+前端调用以下接口：
 
-默认配置使用：
+- `GET /api/config/map`
+- `GET /api/realtime/latest`
+- `GET /api/analysis/density`
+- `GET /api/tracks/single`
+- `GET /api/tracks/candidates`
+- `POST /api/tracks/multi`
+- `GET /api/tracks/global-segment`
+- `GET /ws/realtime` WebSocket 升级连接
 
-- 轨迹表：`tb_ais_event_simple_info`
-- 索引表：`tb_ship_bucket_index`
-- 坐标字段：`longitude_wgs`、`latitude_wgs`
-- 时间字段：`event_time`
-- 船舶字段：`ship_serial_no`
+实时最新船位接口继续返回 compact 结构：`fields` 描述字段顺序，`items` 为二维数组，顺序为 `shipId, shipName, lng, lat, speed, heading, time, isAis`。
 
-敏感信息优先写入项目根目录 `.env`，不要提交真实密码或 API Key。项目需要迁移时，源码、配置模板和资源文件应放在项目目录内；运行日志、缓存和本机私有配置不纳入版本库。
+## 回填命令
 
-## 功能
+默认 dry-run，不写入数据：
 
-- 实时位置：`/api/realtime/latest` 返回全量最新船位，`/ws/realtime` 增量推送。
-- 态势分析：`/api/analysis/density` 按时间窗、bbox 和 zoom 聚合密度点。
-- 单船轨迹：`/api/tracks/single` 按船舶和时间窗抽稀查询。
-- 多船轨迹：`/api/tracks/candidates` 框选查船，`/api/tracks/multi` 最多 100 艘抽稀回放。
-- 全域回放：`/api/tracks/global-segment` 按 1 小时片段查询当前视野 bbox 内抽稀轨迹。
+```powershell
+java -jar target/ship-situation-replay-0.1.0.jar backfill
+```
+
+执行写入：
+
+```powershell
+java -jar target/ship-situation-replay-0.1.0.jar backfill --execute
+```
+
+可选参数：
+
+```text
+--resume
+--target-start=2026-01-07
+--target-days=100
+--batch-days=5
+--reserve-gib=20
+--safety-factor=1.2
+--host-drive=D
+```
+
+回填会先检查源窗口、目标区间、ClickHouse 表大小和磁盘余量。目标区间已有数据时默认中止；确认需要补齐缺失日期时再使用 `--resume`。
 
 ## 可选索引
 
-`db/optional-indexes.sql` 仅提供可选 ClickHouse 跳数索引 SQL，不会自动执行。
-
-建议流程：
-
-1. 先运行应用确认功能。
-2. 用 `db/explain-queries.sql` 记录当前查询计划。
-3. 在 ClickHouse 低峰维护窗口人工执行 `ADD INDEX`。
-4. 需要历史数据命中索引时，再人工执行 `MATERIALIZE INDEX`。
-
-注意：历史索引物化可能耗时较长，执行前应确认磁盘空间和维护窗口。
+`db/optional-indexes.sql` 仅提供 ClickHouse 跳数索引 SQL，不会自动执行。建议先确认应用功能正常，再使用 `db/explain-queries.sql` 对比查询计划，并在低峰维护窗口人工执行索引和物化操作。

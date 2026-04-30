@@ -1,7 +1,6 @@
 const state = {
   mode: "realtime",
   config: null,
-  AMap: null,
   map: null,
   latest: [],
   realtimeWindow: null,
@@ -13,8 +12,14 @@ const state = {
   playIndex: 0,
   speed: 2,
   layers: {
-    mass: null,
     heat: null,
+    trackSource: null,
+    trackLayer: null,
+    markerSource: null,
+    markerLayer: null,
+    rectangleSource: null,
+    rectangleLayer: null,
+    drawBoxInteraction: null,
     lines: [],
     lineQueue: [],
     lineTimer: null,
@@ -46,7 +51,9 @@ const REALTIME_HIT_CELL_SIZE = 32;
 const REALTIME_HIT_RADIUS = 12;
 const REALTIME_DRAW_BUDGET_MS = 8;
 const REALTIME_DRAW_BATCH = 2500;
-const RADAR_SHIP_ID_PATTERN = /^\d+[-_]\d+$/;
+const RADAR_SHIP_ID_PATTERN = /^\d+(?:[-_]\d+)+$/;
+
+const AMAP_TILE_URL = "https://webrd0{sub}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}";
 
 const $ = (id) => document.getElementById(id);
 
@@ -134,12 +141,26 @@ function toMapPoint(point) {
   return state.config?.coordinateSystem === "wgs84" ? wgs84ToGcj02(Number(point.lng), Number(point.lat)) : [Number(point.lng), Number(point.lat)];
 }
 
-function toQueryBBox(bounds) {
-  const sw = bounds.getSouthWest();
-  const ne = bounds.getNorthEast();
-  const qsw = state.config?.coordinateSystem === "wgs84" ? gcj02ToWgs84(sw.lng, sw.lat) : [sw.lng, sw.lat];
-  const qne = state.config?.coordinateSystem === "wgs84" ? gcj02ToWgs84(ne.lng, ne.lat) : [ne.lng, ne.lat];
+function toMapCoordinate(point) {
+  return ol.proj.fromLonLat(toMapPoint(point));
+}
+
+function toQueryBBoxFromLngLat(sw, ne) {
+  const qsw = state.config?.coordinateSystem === "wgs84" ? gcj02ToWgs84(sw[0], sw[1]) : sw;
+  const qne = state.config?.coordinateSystem === "wgs84" ? gcj02ToWgs84(ne[0], ne[1]) : ne;
   return { west: qsw[0], south: qsw[1], east: qne[0], north: qne[1] };
+}
+
+function currentDataBBox() {
+  if (!state.map) return null;
+  const size = state.map.getSize();
+  if (!size) return null;
+  const extent = state.map.getView().calculateExtent(size);
+  return toQueryBBoxFromLngLat(ol.proj.toLonLat([extent[0], extent[1]]), ol.proj.toLonLat([extent[2], extent[3]]));
+}
+
+function getMapZoom() {
+  return Math.round(state.map?.getView().getZoom() || state.config?.defaultZoom || 0);
 }
 
 function qs(params) {
@@ -182,11 +203,6 @@ function groupByShip(points) {
   });
   grouped.forEach((items) => items.sort((a, b) => String(a.time).localeCompare(String(b.time))));
   return grouped;
-}
-
-function currentDataBBox() {
-  if (!state.map) return null;
-  return toQueryBBox(state.map.getBounds());
 }
 
 function normalizeRealtimeItem(item) {
@@ -354,9 +370,10 @@ function syncRealtimeCanvasDuringMove() {
   state.layers.realtimePanFrame = requestAnimationFrame(() => {
     state.layers.realtimePanFrame = null;
     if (state.mode !== "realtime" || !state.layers.realtimeCanvas || !state.layers.realtimeRenderAnchor) return;
-    const currentPixel = state.map.lngLatToContainer(state.layers.realtimeRenderAnchor);
-    const dx = Math.round(currentPixel.x - state.layers.realtimeRenderAnchorPixel.x);
-    const dy = Math.round(currentPixel.y - state.layers.realtimeRenderAnchorPixel.y);
+    const currentPixel = state.map.getPixelFromCoordinate(state.layers.realtimeRenderAnchor);
+    if (!currentPixel) return;
+    const dx = Math.round(currentPixel[0] - state.layers.realtimeRenderAnchorPixel[0]);
+    const dy = Math.round(currentPixel[1] - state.layers.realtimeRenderAnchorPixel[1]);
     state.layers.realtimeCanvas.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
   });
 }
@@ -422,10 +439,6 @@ function switchMode(mode) {
     global: "全域轨迹回放"
   }[mode];
   clearLayers();
-  if (previousMode === "realtime" && mode !== "realtime" && state.layers.mass) {
-    state.layers.mass.setMap(null);
-    state.layers.mass = null;
-  }
   if (mode === "realtime") renderRealtime();
   if (mode === "analysis") renderHeat();
   if (["single", "multi", "global"].includes(mode)) renderTracks();
@@ -437,13 +450,14 @@ function clearLayers() {
     clearTimeout(state.layers.lineTimer);
     state.layers.lineTimer = null;
   }
-  if (state.layers.mass && state.mode !== "realtime") state.layers.mass.setMap(null);
-  if (state.layers.heat) state.layers.heat.setMap(null);
-  state.layers.lines.forEach((line) => state.map.remove(line));
-  state.layers.markers.forEach((marker) => state.map.remove(marker));
+  if (state.layers.heat) {
+    state.map.removeLayer(state.layers.heat);
+    state.layers.heat = null;
+  }
+  state.layers.trackSource?.clear();
+  state.layers.markerSource?.clear();
+  if (state.mode !== "multi") state.layers.rectangleSource?.clear();
   if (state.mode !== "realtime") clearRealtimeCanvas();
-  state.layers.mass = null;
-  state.layers.heat = null;
   state.layers.lines = [];
   state.layers.markers = [];
 }
@@ -546,10 +560,29 @@ function drawShipTriangle(ctx, x, y, heading, color) {
   ctx.restore();
 }
 
+function shipMarkerStyle(heading) {
+  return new ol.style.Style({
+    image: new ol.style.RegularShape({
+      points: 3,
+      radius: 12,
+      rotation: ((heading || 0) * Math.PI) / 180,
+      rotateWithView: true,
+      fill: new ol.style.Fill({ color: "#0f62c7" }),
+      stroke: new ol.style.Stroke({ color: "rgba(255,255,255,0.96)", width: 2 })
+    })
+  });
+}
+
+function lineAndRectangleStyle(color, width, fillOpacity = 0) {
+  return new ol.style.Style({
+    stroke: new ol.style.Stroke({ color, width }),
+    fill: new ol.style.Fill({ color: `rgba(37, 99, 235, ${fillOpacity})` })
+  });
+}
+
 function pixelFromShip(item) {
-  const lngLat = new state.AMap.LngLat(item.mapLng, item.mapLat);
-  const pixel = state.map.lngLatToContainer(lngLat);
-  return { x: pixel.x, y: pixel.y };
+  const pixel = state.map.getPixelFromCoordinate(ol.proj.fromLonLat([item.mapLng, item.mapLat]));
+  return pixel ? { x: pixel[0], y: pixel[1] } : null;
 }
 
 function addRealtimeHit(hit) {
@@ -562,15 +595,11 @@ function addRealtimeHit(hit) {
 function renderRealtimeCanvas(indices) {
   const layer = ensureRealtimeCanvasLayer();
   if (!layer) return false;
-  if (state.layers.mass) {
-    state.layers.mass.setMap(null);
-    state.layers.mass = null;
-  }
   const { ctx, width, height } = layer;
   if (state.layers.realtimeFrame) cancelAnimationFrame(state.layers.realtimeFrame);
   layer.canvas.style.transform = "";
-  state.layers.realtimeRenderAnchor = state.map.getCenter();
-  state.layers.realtimeRenderAnchorPixel = state.map.lngLatToContainer(state.layers.realtimeRenderAnchor);
+  state.layers.realtimeRenderAnchor = state.map.getView().getCenter();
+  state.layers.realtimeRenderAnchorPixel = state.map.getPixelFromCoordinate(state.layers.realtimeRenderAnchor);
   const seq = (state.layers.realtimeRenderSeq += 1);
   ctx.clearRect(0, 0, width, height);
   state.layers.realtimeHits = [];
@@ -586,6 +615,7 @@ function renderRealtimeCanvas(indices) {
       cursor += 1;
       if (!item) continue;
       const pixel = pixelFromShip(item);
+      if (!pixel) continue;
       if (pixel.x < -20 || pixel.x > width + 20 || pixel.y < -20 || pixel.y > height + 20) continue;
       drawShipTriangle(ctx, pixel.x, pixel.y, item.heading, canvasShipColor(item));
       addRealtimeHit({ x: pixel.x, y: pixel.y, index: indices[cursor - 1] });
@@ -602,45 +632,16 @@ function renderRealtimeCanvas(indices) {
   return true;
 }
 
-function renderRealtimeMassMarks(indices) {
-  const visibleItems = indices.map((index) => state.realtimeStore.items[index]).filter(Boolean);
-  const data = visibleItems.map((item) => ({
-    lnglat: [item.mapLng, item.mapLat],
-    name: item.shipName || item.shipId,
-    id: item.shipId,
-    speed: item.speed,
-    heading: item.heading,
-    time: item.time,
-    isAis: item.isAis,
-    style: Number(item.speed) > 8 ? 1 : 0
-  }));
-  const styles = [
-    { url: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 22 22'%3E%3Cpath d='M11 2 18 20 11 16 4 20z' fill='%23168a52' stroke='%23ffffff' stroke-width='1.4'/%3E%3C/svg%3E", anchor: new state.AMap.Pixel(11, 11), size: new state.AMap.Size(22, 22) },
-    { url: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 22 22'%3E%3Cpath d='M11 2 18 20 11 16 4 20z' fill='%232b6fe8' stroke='%23ffffff' stroke-width='1.4'/%3E%3C/svg%3E", anchor: new state.AMap.Pixel(11, 11), size: new state.AMap.Size(22, 22) }
-  ];
-  if (state.layers.mass && typeof state.layers.mass.setData === "function") {
-    state.layers.mass.setData(data);
-    return;
-  }
-  if (state.layers.mass) state.layers.mass.setMap(null);
-  const layer = new state.AMap.MassMarks(data, { opacity: 0.9, zIndex: 120, style: styles });
-  layer.on("mouseover", (event) => showShipInfo(event.data));
-  layer.on("mouseout", () => hideShipInfo());
-  layer.on("click", (event) => selectRealtimeShip(event.data.id, event.data.name));
-  layer.setMap(state.map);
-  state.layers.mass = layer;
-}
-
 function renderRealtime() {
-  if (!state.AMap || !state.map || state.mode !== "realtime") return;
+  if (!state.map || state.mode !== "realtime") return;
   const startedAt = performance.now();
   const indices = queryVisibleShipIndices();
   try {
     renderRealtimeCanvas(indices);
   } catch (error) {
-    console.warn("Realtime canvas failed, fallback to MassMarks", error);
+    console.warn("Realtime canvas failed", error);
     clearRealtimeCanvas();
-    renderRealtimeMassMarks(indices);
+    showError("Realtime canvas failed: " + error.message);
   }
   const elapsed = Math.round(performance.now() - startedAt);
   setStatus(`内存缓存 ${state.latest.length.toLocaleString()} 艘，当前视野 ${indices.length.toLocaleString()} 艘，耗时 ${elapsed} ms`);
@@ -660,8 +661,8 @@ function normalizeShipInfoData(data) {
 
 function hitTestShip(pixel) {
   if (!pixel) return null;
-  const px = Number(pixel.x);
-  const py = Number(pixel.y);
+  const px = Number(Array.isArray(pixel) ? pixel[0] : pixel.x);
+  const py = Number(Array.isArray(pixel) ? pixel[1] : pixel.y);
   const cellX = Math.floor(px / REALTIME_HIT_CELL_SIZE);
   const cellY = Math.floor(py / REALTIME_HIT_CELL_SIZE);
   let best = null;
@@ -713,17 +714,11 @@ function handleRealtimeDomClick(event) {
 }
 
 function showShipInfo(data) {
-  if (!state.AMap || !state.map) return;
+  if (!state.map) return;
   data = normalizeShipInfoData(data);
   if (state.layers.hoverShipId === data.id) return;
   state.layers.hoverShipId = data.id;
-  if (!state.layers.infoWindow) {
-    state.layers.infoWindow = new state.AMap.InfoWindow({
-      offset: new state.AMap.Pixel(0, -18),
-      closeWhenClickMap: true
-    });
-  }
-  const typeText = Number(data.isAis) === 1 ? "AIS 船只" : "雷达船";
+  const typeText = Number(data.isAis) === 1 ? "AIS" : "Radar";
   const content = `
     <div class="ship-info">
       <strong>${escapeHtml(data.name || data.id)}</strong>
@@ -734,9 +729,15 @@ function showShipInfo(data) {
       <div>时间：${escapeHtml(data.time || "--")}</div>
     </div>
   `;
-  state.layers.infoWindow.setContent(content);
-  const position = Array.isArray(data.lnglat) ? new state.AMap.LngLat(data.lnglat[0], data.lnglat[1]) : data.lnglat;
-  state.layers.infoWindow.open(state.map, position);
+  const card = $("ship-hover-card");
+  card.innerHTML = content;
+  card.classList.remove("hidden");
+  const position = Array.isArray(data.lnglat) ? data.lnglat : [data.mapLng, data.mapLat];
+  const pixel = state.map.getPixelFromCoordinate(ol.proj.fromLonLat(position));
+  if (pixel) {
+    card.style.left = `${Math.round(pixel[0] + 14)}px`;
+    card.style.top = `${Math.round(pixel[1] + 14)}px`;
+  }
   setTimeout(() => {
     document.querySelectorAll(".ship-info").forEach((node) => {
       node.onclick = (event) => {
@@ -751,7 +752,7 @@ function showShipInfo(data) {
 
 function hideShipInfo() {
   state.layers.hoverShipId = "";
-  state.layers.infoWindow?.close();
+  $("ship-hover-card")?.classList.add("hidden");
 }
 
 async function selectRealtimeShip(shipId, shipName) {
@@ -768,28 +769,36 @@ async function selectRealtimeShip(shipId, shipName) {
 }
 
 function renderHeat() {
-  if (!state.AMap || !state.map || state.mode !== "analysis") return;
-  if (state.layers.heat) state.layers.heat.setMap(null);
-  const heat = new state.AMap.HeatMap(state.map, {
+  if (!state.map || state.mode !== "analysis") return;
+  if (state.layers.heat) state.map.removeLayer(state.layers.heat);
+  const max = Math.max(1, ...state.density.map((item) => Number(item.count)));
+  const source = new ol.source.Vector({
+    features: state.density.map((item) => {
+      const feature = new ol.Feature({ geometry: new ol.geom.Point(toMapCoordinate(item)) });
+      feature.set("weight", Math.max(0.05, Math.min(1, Number(item.count) / max)));
+      return feature;
+    })
+  });
+  const heat = new ol.layer.Heatmap({
+    source,
     radius: 28,
-    opacity: [0.15, 0.85],
-    gradient: { 0.25: "rgb(64,132,255)", 0.55: "rgb(88,211,141)", 0.75: "rgb(255,213,79)", 1: "rgb(232,76,61)" }
+    blur: 18,
+    opacity: 0.85,
+    gradient: ["rgba(64,132,255,0)", "rgb(64,132,255)", "rgb(88,211,141)", "rgb(255,213,79)", "rgb(232,76,61)"],
+    weight: (feature) => feature.get("weight")
   });
-  const data = state.density.map((item) => {
-    const [lng, lat] = toMapPoint(item);
-    return { lng, lat, count: Number(item.count) };
-  });
-  heat.setDataSet({ data, max: Math.max(1, ...state.density.map((item) => Number(item.count))) });
+  heat.setZIndex(20);
+  state.map.addLayer(heat);
   state.layers.heat = heat;
 }
 
 function renderTracks() {
-  if (!state.AMap || !state.map) return;
+  if (!state.map) return;
   if (state.layers.lineTimer) {
     clearTimeout(state.layers.lineTimer);
     state.layers.lineTimer = null;
   }
-  state.layers.lines.forEach((line) => state.map.remove(line));
+  state.layers.trackSource?.clear();
   state.layers.lines = [];
   const palette = ["#2563eb", "#16a34a", "#dc2626", "#d97706", "#7c3aed", "#0891b2", "#be123c"];
   state.layers.lineQueue = Array.from(groupByShip(state.trackPoints).entries()).map(([ship, points], index) => ({ ship, points, index, palette }));
@@ -800,18 +809,22 @@ function renderTracks() {
 function drawLineBatch() {
   const batch = state.layers.lineQueue.splice(0, state.mode === "global" ? 120 : 30);
   batch.forEach(({ ship, points, index, palette }) => {
-    const path = points.map(toMapPoint);
+    const path = points.map(toMapCoordinate);
     if (path.length < 2) return;
-    const line = new state.AMap.Polyline({
-      path,
-      strokeColor: palette[index % palette.length],
-      strokeWeight: state.mode === "global" ? 2 : 4,
-      strokeOpacity: state.mode === "global" ? 0.35 : 0.85,
-      lineJoin: "round",
-      showDir: state.mode !== "global"
+    const line = new ol.Feature({
+      geometry: new ol.geom.LineString(path),
+      ship,
+      points: points.length
     });
-    line.on("mouseover", () => setStatus(`${ship} / ${points.length} track points`));
-    state.map.add(line);
+    line.setStyle(new ol.style.Style({
+      stroke: new ol.style.Stroke({
+        color: palette[index % palette.length],
+        width: state.mode === "global" ? 2 : 4,
+        lineJoin: "round"
+      })
+    }));
+    line.set("opacity", state.mode === "global" ? 0.35 : 0.85);
+    state.layers.trackSource?.addFeature(line);
     state.layers.lines.push(line);
   });
   if (state.layers.lineQueue.length) {
@@ -820,20 +833,19 @@ function drawLineBatch() {
 }
 
 function renderPlaybackMarkers() {
-  if (!state.AMap || !state.map || !["single", "multi", "global"].includes(state.mode)) return;
-  state.layers.markers.forEach((marker) => state.map.remove(marker));
+  if (!state.map || !["single", "multi", "global"].includes(state.mode)) return;
+  state.layers.markerSource?.clear();
   state.layers.markers = [];
   const visible = state.trackPoints.slice(0, Math.max(1, state.playIndex + 1));
   const latestByShip = new Map();
   visible.forEach((point) => latestByShip.set(point.shipId, point));
   latestByShip.forEach((point) => {
-    const marker = new state.AMap.Marker({
-        position: toMapPoint(point),
-        angle: Number(point.heading || 0),
-        offset: new state.AMap.Pixel(-11, -11),
-        content: '<div class="ship-marker"></div>'
-      });
-    state.map.add(marker);
+    const marker = new ol.Feature({
+      geometry: new ol.geom.Point(toMapCoordinate(point)),
+      point
+    });
+    marker.setStyle(shipMarkerStyle(Number(point.heading || 0)));
+    state.layers.markerSource?.addFeature(marker);
     state.layers.markers.push(marker);
   });
   updateMetrics();
@@ -843,7 +855,7 @@ async function loadLatest() {
   setStatus("正在加载实时船位");
   state.latest = [];
   const windowQuery = realtimeWindowQuery();
-  const data = await getJson(`/api/realtime/latest${windowQuery ? `?${windowQuery}` : ""}`);
+  const data = await getJson("/api/realtime/latest" + (windowQuery ? "?" + windowQuery : ""));
   syncRealtimeWindowInputs(data.window);
   state.realtimeWindow = data.window || null;
   buildRealtimeStore(normalizeRealtimeItems(data));
@@ -864,7 +876,7 @@ async function loadLatest() {
 async function loadDensity() {
   switchMode("analysis");
   setStatus("正在查询态势密度");
-  const params = qs({ start: toIso($("start").value), end: toIso($("end").value), zoom: Math.round(state.map.getZoom()), ...toQueryBBox(state.map.getBounds()) });
+  const params = qs({ start: toIso($("start").value), end: toIso($("end").value), zoom: getMapZoom(), ...currentDataBBox() });
   const data = await getJson(`/api/analysis/density?${params}`);
   state.density = data.items;
   renderHeat();
@@ -875,7 +887,7 @@ async function loadDensity() {
 async function loadSingleTrack() {
   switchMode("single");
   setStatus("正在查询单船轨迹");
-  const params = qs({ shipId: $("ship-id").value.trim(), start: toIso($("start").value), end: toIso($("end").value), zoom: Math.round(state.map.getZoom()) });
+  const params = qs({ shipId: $("ship-id").value.trim(), start: toIso($("start").value), end: toIso($("end").value), zoom: getMapZoom() });
   const data = await getJson(`/api/tracks/single?${params}`);
   state.trackPoints = data.items;
   state.playIndex = 0;
@@ -884,7 +896,7 @@ async function loadSingleTrack() {
   setStatus(`单船轨迹 ${state.trackPoints.length.toLocaleString()} 个抽稀点`);
 }
 
-async function loadCandidates(bbox = toQueryBBox(state.map.getBounds())) {
+async function loadCandidates(bbox = currentDataBBox()) {
   setStatus("正在查询候选船舶");
   const params = qs({ start: toIso($("start").value), end: toIso($("end").value), ...bbox, limit: state.config.maxMultiShips });
   const data = await getJson(`/api/tracks/candidates?${params}`);
@@ -917,20 +929,24 @@ function renderCandidateList() {
 function drawBox() {
   switchMode("multi");
   setStatus("拖拽地图框选船舶范围");
-  const mouseTool = new state.AMap.MouseTool(state.map);
-  mouseTool.rectangle({
-    strokeColor: "#2563eb",
-    strokeOpacity: 0.9,
-    strokeWeight: 2,
-    fillColor: "#2563eb",
-    fillOpacity: 0.08
+  if (state.layers.drawBoxInteraction) {
+    state.map.removeInteraction(state.layers.drawBoxInteraction);
+    state.layers.drawBoxInteraction = null;
+  }
+  const dragBox = new ol.interaction.DragBox({ condition: ol.events.condition.always });
+  dragBox.on("boxend", async () => {
+    const extent = dragBox.getGeometry().getExtent();
+    state.layers.rectangleSource?.clear();
+    const rectangle = new ol.Feature({ geometry: ol.geom.Polygon.fromExtent(extent) });
+    state.layers.rectangleSource?.addFeature(rectangle);
+    state.map.removeInteraction(dragBox);
+    state.layers.drawBoxInteraction = null;
+    const sw = ol.proj.toLonLat([extent[0], extent[1]]);
+    const ne = ol.proj.toLonLat([extent[2], extent[3]]);
+    await loadCandidates(toQueryBBoxFromLngLat(sw, ne));
   });
-  mouseTool.on("draw", async (event) => {
-    if (state.layers.rectangle) state.map.remove(state.layers.rectangle);
-    state.layers.rectangle = event.obj;
-    mouseTool.close(false);
-    await loadCandidates(toQueryBBox(event.obj.getBounds()));
-  });
+  state.layers.drawBoxInteraction = dragBox;
+  state.map.addInteraction(dragBox);
 }
 
 async function loadMultiTrack() {
@@ -940,8 +956,8 @@ async function loadMultiTrack() {
     shipIds: state.selectedShips,
     start: toIso($("start").value),
     end: toIso($("end").value),
-    zoom: Math.round(state.map.getZoom()),
-    bbox: toQueryBBox(state.map.getBounds())
+    zoom: getMapZoom(),
+    bbox: currentDataBBox()
   });
   state.trackPoints = data.items;
   state.playIndex = 0;
@@ -955,7 +971,7 @@ async function loadGlobalSegment() {
   setStatus("正在加载全域小时片段");
   const start = new Date($("segment-start").value);
   const end = new Date(start.getTime() + 60 * 60 * 1000);
-  const params = qs({ start: start.toISOString(), end: end.toISOString(), zoom: Math.round(state.map.getZoom()), ...toQueryBBox(state.map.getBounds()) });
+  const params = qs({ start: start.toISOString(), end: end.toISOString(), zoom: getMapZoom(), ...currentDataBBox() });
   const data = await getJson(`/api/tracks/global-segment?${params}`);
   state.trackPoints = [...state.trackPoints, ...data.items];
   state.playIndex = 0;
@@ -977,46 +993,65 @@ function tickPlayer() {
   setTimeout(tickPlayer, 400);
 }
 
-function loadAmapScript(key, securityCode) {
-  return new Promise((resolve, reject) => {
-    if (securityCode) window._AMapSecurityConfig = { securityJsCode: securityCode };
-    window.onAmapLoaded = () => resolve(window.AMap);
-    const script = document.createElement("script");
-    script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(key)}&plugin=AMap.Scale,AMap.ToolBar,AMap.HeatMap,AMap.MouseTool&callback=onAmapLoaded`;
-    script.onerror = () => reject(new Error("AMap JS API failed to load"));
-    document.head.appendChild(script);
+function createAmapTileLayer() {
+  return new ol.layer.Tile({
+    source: new ol.source.XYZ({
+      maxZoom: 18,
+      tileUrlFunction: (tileCoord) => {
+        if (!tileCoord) return "";
+        const [z, x, y] = tileCoord;
+        const sub = Math.abs(x + y) % 4 + 1;
+        return AMAP_TILE_URL.replace("{sub}", String(sub)).replace("{x}", String(x)).replace("{y}", String(y)).replace("{z}", String(z));
+      },
+      crossOrigin: "anonymous"
+    })
   });
+}
+
+function initMap() {
+  const center = state.config.coordinateSystem === "wgs84"
+    ? wgs84ToGcj02(state.config.defaultCenter[0], state.config.defaultCenter[1])
+    : state.config.defaultCenter;
+
+  state.layers.trackSource = new ol.source.Vector();
+  state.layers.markerSource = new ol.source.Vector();
+  state.layers.rectangleSource = new ol.source.Vector();
+  state.layers.trackLayer = new ol.layer.Vector({ source: state.layers.trackSource, zIndex: 30 });
+  state.layers.markerLayer = new ol.layer.Vector({ source: state.layers.markerSource, zIndex: 40 });
+  state.layers.rectangleLayer = new ol.layer.Vector({
+    source: state.layers.rectangleSource,
+    zIndex: 35,
+    style: lineAndRectangleStyle("#2563eb", 2, 0.08)
+  });
+
+  state.map = new ol.Map({
+    target: "map",
+    layers: [createAmapTileLayer(), state.layers.trackLayer, state.layers.rectangleLayer, state.layers.markerLayer],
+    view: new ol.View({
+      center: ol.proj.fromLonLat(center),
+      zoom: state.config.defaultZoom
+    }),
+    controls: ol.control.defaults.defaults().extend([new ol.control.ScaleLine()])
+  });
+
+  state.map.on("movestart", syncRealtimeCanvasDuringMove);
+  state.map.on("pointerdrag", syncRealtimeCanvasDuringMove);
+  state.map.on("moveend", () => scheduleRealtimeRender());
+  state.map.getView().on("change:resolution", () => scheduleRealtimeRender());
+  state.map.on("pointermove", handleRealtimePointerMove);
+  state.map.on("click", handleRealtimeClick);
+  $("map").addEventListener("mouseleave", hideShipInfo);
 }
 
 async function init() {
   try {
     state.config = await getJson("/api/config/map");
-    if (!state.config.amapKey) {
-      showError("Please configure VITE_AMAP_KEY in .env or environment variables, then restart the server");
-      return;
-    }
-    state.AMap = await loadAmapScript(state.config.amapKey, state.config.amapSecurityJsCode);
-    const center = state.config.coordinateSystem === "wgs84" ? wgs84ToGcj02(state.config.defaultCenter[0], state.config.defaultCenter[1]) : state.config.defaultCenter;
-    state.map = new state.AMap.Map("map", {
-      zoom: state.config.defaultZoom,
-      center,
-      mapStyle: "amap://styles/normal",
-      viewMode: "2D"
-    });
-    state.map.addControl(new state.AMap.Scale());
-    state.map.addControl(new state.AMap.ToolBar({ position: "RB" }));
-    state.map.on("mapmove", syncRealtimeCanvasDuringMove);
-    state.map.on("moveend", () => {
-      scheduleRealtimeRender();
-    });
-    state.map.on("zoomend", () => {
-      scheduleRealtimeRender();
-    });
-    state.map.on("mousemove", handleRealtimePointerMove);
-    state.map.on("click", handleRealtimeClick);
-    state.map.on("mouseout", hideShipInfo);
+    initMap();
     document.addEventListener("click", handleRealtimeDomClick, true);
-    window.addEventListener("resize", () => scheduleRealtimeRender(50), { passive: true });
+    window.addEventListener("resize", () => {
+      state.map.updateSize();
+      scheduleRealtimeRender(50);
+    }, { passive: true });
     bindEvents();
     await loadLatest().catch((error) => {
       showError(error.message);
@@ -1069,7 +1104,7 @@ function bindEvents() {
   };
   $("play").onclick = () => {
     state.playing = !state.playing;
-    $("play").textContent = state.playing ? "Pause" : "Play";
+    $("play").textContent = state.playing ? "暂停" : "播放";
   };
   $("stop").onclick = () => {
     state.playing = false;
@@ -1087,3 +1122,7 @@ function bindEvents() {
 }
 
 init();
+
+
+
+

@@ -169,6 +169,12 @@ label {
   pointer-events: none;
 }
 
+.map .amap-info,
+.map .amap-info-contentContainer,
+.map .amap-info-sharp {
+  z-index: 10000 !important;
+}
+
 .error-panel {
   position: absolute;
   left: 24px;
