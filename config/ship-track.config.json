@@ -27,7 +27,7 @@
   },
   "query": {
     "latestLookbackHours": 5,
-    "realtimeWindowHours": 2,
+    "realtimeWindowMinutes": 120,
     "realtimePollSeconds": 5,
     "clickhouseTimeoutSeconds": 30,
     "latestPageSize": 30000,

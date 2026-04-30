@@ -42,11 +42,12 @@ public class ShipTrackConfig {
 
   public static class Query {
     public int latestLookbackHours = 5;
-    public int realtimeWindowHours = 2;
+    public int realtimeWindowMinutes = 120;
     public int realtimePollSeconds = 5;
     public int clickhouseTimeoutSeconds = 30;
     public int latestPageSize = 30000;
     public int maxLatestShips = 300000;
+    public int realtimeCacheMaxShips = 1000000;
     public int maxRealtimeDeltaShips = 10000;
     public int maxDensityCells = 30000;
     public int maxTrackPointsPerShip = 3000;

@@ -1,4 +1,4 @@
-const state = {
+﻿const state = {
   mode: "realtime",
   config: null,
   map: null,
@@ -18,10 +18,9 @@ const state = {
     windowShips: 0,
     memoryShips: 0,
     viewportShips: 0,
+    summaryWindowKey: "",
     summaryTimer: null,
-    viewportTimer: null,
-    summarySeq: 0,
-    viewportSeq: 0
+    summarySeq: 0
   },
   layers: {
     heat: null,
@@ -43,6 +42,7 @@ const state = {
     realtimePanFrame: null,
     realtimeRenderAnchor: null,
     realtimeRenderAnchorPixel: null,
+    realtimeRenderResolution: null,
     realtimeHits: [],
     realtimeHitGrid: new Map(),
     realtimeVisibleCount: 0,
@@ -191,17 +191,33 @@ function toLocalDatetime(date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
+function realtimeWindowParams() {
+  const point = $("realtime-point")?.value;
+  const minutesValue = $("realtime-minutes")?.value;
+  const minutes = Number(minutesValue || 120);
+  if (point && Number.isFinite(minutes) && minutes > 0) {
+    return { timePoint: toIso(point), minutes };
+  }
+  if (state.realtimeWindow?.start && state.realtimeWindow?.end) {
+    const start = new Date(String(state.realtimeWindow.start).replace(" ", "T"));
+    const end = new Date(String(state.realtimeWindow.end).replace(" ", "T"));
+    const fallbackMinutes = Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000));
+    return { timePoint: toLocalDatetime(end), minutes: fallbackMinutes };
+  }
+  return null;
+}
+
 function syncRealtimeWindowInputs(windowValue) {
   if (!windowValue?.start || !windowValue?.end) return;
-  $("realtime-start").value = toLocalDatetime(new Date(String(windowValue.start).replace(" ", "T")));
-  $("realtime-end").value = toLocalDatetime(new Date(String(windowValue.end).replace(" ", "T")));
+  const start = new Date(String(windowValue.start).replace(" ", "T"));
+  const end = new Date(String(windowValue.end).replace(" ", "T"));
+  $("realtime-point").value = toLocalDatetime(end);
+  $("realtime-minutes").value = String(Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000)));
 }
 
 function realtimeWindowQuery() {
-  const start = $("realtime-start")?.value;
-  const end = $("realtime-end")?.value;
-  if (!start || !end) return "";
-  return qs({ start: toIso(start), end: toIso(end) });
+  const params = realtimeWindowParams();
+  return params ? qs(params) : "";
 }
 
 function sameWindow(a, b) {
@@ -381,15 +397,19 @@ function scheduleRealtimeRender(delay = 120) {
 function syncRealtimeCanvasDuringMove() {
   if (state.mode !== "realtime" || !state.map || !state.layers.realtimeCanvas) return;
   if (!state.layers.realtimeRenderAnchor || !state.layers.realtimeRenderAnchorPixel) return;
+  if (!Number.isFinite(state.layers.realtimeRenderResolution)) return;
   if (state.layers.realtimePanFrame) return;
   state.layers.realtimePanFrame = requestAnimationFrame(() => {
     state.layers.realtimePanFrame = null;
     if (state.mode !== "realtime" || !state.layers.realtimeCanvas || !state.layers.realtimeRenderAnchor) return;
     const currentPixel = state.map.getPixelFromCoordinate(state.layers.realtimeRenderAnchor);
     if (!currentPixel) return;
-    const dx = Math.round(currentPixel[0] - state.layers.realtimeRenderAnchorPixel[0]);
-    const dy = Math.round(currentPixel[1] - state.layers.realtimeRenderAnchorPixel[1]);
-    state.layers.realtimeCanvas.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
+    const currentResolution = state.map.getView().getResolution();
+    if (!Number.isFinite(currentResolution) || currentResolution <= 0) return;
+    const scale = state.layers.realtimeRenderResolution / currentResolution;
+    const dx = Math.round(currentPixel[0] - state.layers.realtimeRenderAnchorPixel[0] * scale);
+    const dy = Math.round(currentPixel[1] - state.layers.realtimeRenderAnchorPixel[1] * scale);
+    state.layers.realtimeCanvas.style.transform = `translate3d(${dx}px, ${dy}px, 0) scale(${scale})`;
   });
 }
 
@@ -447,12 +467,7 @@ function updateMetrics() {
 
 function activeStatsWindow() {
   if (state.mode === "realtime") {
-    const start = $("realtime-start")?.value;
-    const end = $("realtime-end")?.value;
-    if (start && end) return { start: toIso(start), end: toIso(end) };
-    if (state.realtimeWindow?.start && state.realtimeWindow?.end) {
-      return { start: new Date(String(state.realtimeWindow.start).replace(" ", "T")).toISOString(), end: new Date(String(state.realtimeWindow.end).replace(" ", "T")).toISOString() };
-    }
+    return realtimeWindowParams();
   }
   const start = $("start")?.value;
   const end = $("end")?.value;
@@ -460,38 +475,21 @@ function activeStatsWindow() {
   return { start: toIso(start), end: toIso(end) };
 }
 
-async function refreshViewportStats() {
-  const bbox = currentDataBBox();
-  const windowValue = activeStatsWindow();
-  if (!bbox || !windowValue) return;
-  const seq = ++state.stats.viewportSeq;
-  const params = qs({ ...windowValue, ...bbox });
-  const data = await getJson(`/api/stats/viewport?${params}`);
-  if (seq !== state.stats.viewportSeq) return;
-  state.stats.viewportShips = Number(data.viewportShips || 0);
-  updateMetrics();
-}
-
 async function refreshRealtimeSummary() {
   const windowValue = activeStatsWindow();
   if (!windowValue) return;
+  const windowKey = JSON.stringify(windowValue);
+  if (windowKey === state.stats.summaryWindowKey) return;
   const seq = ++state.stats.summarySeq;
   const params = qs(windowValue);
   const data = await getJson(`/api/stats/realtime-summary?${params}`);
   if (seq !== state.stats.summarySeq) return;
+  state.stats.summaryWindowKey = windowKey;
   state.stats.databaseTrackPoints = Number(data.databaseTrackPoints || 0);
   state.stats.databaseShips = Number(data.databaseShips || 0);
   state.stats.windowTrackPoints = Number(data.windowTrackPoints || 0);
   state.stats.windowShips = Number(data.windowShips || 0);
   updateMetrics();
-}
-
-function scheduleViewportStats(delay = 260) {
-  if (state.stats.viewportTimer) clearTimeout(state.stats.viewportTimer);
-  state.stats.viewportTimer = setTimeout(() => {
-    state.stats.viewportTimer = null;
-    refreshViewportStats().catch((error) => setStatus("统计刷新失败: " + error.message));
-  }, delay);
 }
 
 function scheduleRealtimeSummary(delay = 260) {
@@ -521,7 +519,6 @@ function switchMode(mode) {
   if (mode === "realtime") renderRealtime();
   if (mode === "analysis") renderHeat();
   if (["single", "multi", "global"].includes(mode)) renderTracks();
-  scheduleViewportStats(0);
 }
 
 function clearLayers() {
@@ -552,6 +549,7 @@ function ensureRealtimeCanvasLayer() {
     const canvas = document.createElement("canvas");
     canvas.id = "realtime-canvas";
     canvas.className = "realtime-canvas";
+    canvas.style.transformOrigin = "0 0";
     wrap.insertBefore(canvas, $("error"));
     state.layers.realtimeCanvas = canvas;
     state.layers.realtimeCtx = canvas.getContext("2d", { alpha: true });
@@ -593,6 +591,7 @@ function clearRealtimeCanvas() {
   }
   state.layers.realtimeRenderAnchor = null;
   state.layers.realtimeRenderAnchorPixel = null;
+  state.layers.realtimeRenderResolution = null;
   state.layers.realtimeHits = [];
   state.layers.realtimeHitGrid = new Map();
   state.layers.realtimeVisibleCount = 0;
@@ -683,6 +682,7 @@ function renderRealtimeCanvas(indices) {
   layer.canvas.style.transform = "";
   state.layers.realtimeRenderAnchor = state.map.getView().getCenter();
   state.layers.realtimeRenderAnchorPixel = state.map.getPixelFromCoordinate(state.layers.realtimeRenderAnchor);
+  state.layers.realtimeRenderResolution = state.map.getView().getResolution();
   const seq = (state.layers.realtimeRenderSeq += 1);
   ctx.clearRect(0, 0, width, height);
   state.layers.realtimeHits = [];
@@ -719,6 +719,7 @@ function renderRealtime() {
   if (!state.map || state.mode !== "realtime") return;
   const startedAt = performance.now();
   const indices = queryVisibleShipIndices();
+  state.stats.viewportShips = indices.length;
   try {
     renderRealtimeCanvas(indices);
   } catch (error) {
@@ -1008,7 +1009,6 @@ async function loadLatest() {
   renderRealtime();
   updateMetrics();
   scheduleRealtimeSummary(0);
-  scheduleViewportStats(0);
   const sourceText = data.source === "memory" ? "内存缓存" : "数据库查询";
   setStatus(`${sourceText}已加载 ${state.latest.length.toLocaleString()} 条最新船位`);
 }
@@ -1021,7 +1021,6 @@ async function loadDensity() {
   state.density = data.items;
   renderHeat();
   updateMetrics();
-  scheduleViewportStats(0);
   setStatus(`密度网格 ${state.density.length.toLocaleString()} 个`);
 }
 
@@ -1179,11 +1178,10 @@ function initMap() {
   state.map.on("pointerdrag", syncRealtimeCanvasDuringMove);
   state.map.on("moveend", () => {
     scheduleRealtimeRender();
-    scheduleViewportStats();
   });
   state.map.getView().on("change:resolution", () => {
+    syncRealtimeCanvasDuringMove();
     scheduleRealtimeRender();
-    scheduleViewportStats();
   });
   state.map.on("pointermove", handleRealtimePointerMove);
   state.map.on("click", handleRealtimeClick);
@@ -1198,7 +1196,6 @@ async function init() {
     window.addEventListener("resize", () => {
       state.map.updateSize();
       scheduleRealtimeRender(50);
-      scheduleViewportStats(80);
     }, { passive: true });
     bindEvents();
     await loadLatest().catch((error) => {
@@ -1220,7 +1217,6 @@ function connectWebSocket() {
       if (payload.window && state.realtimeWindow && !sameWindow(payload.window, state.realtimeWindow)) return;
       upsertRealtimeItems(payload.items || []);
       scheduleRealtimeRender(16);
-      scheduleViewportStats(500);
       updateMetrics();
       setStatus(`WebSocket pushed ${payload.items.length} ships`);
     }
@@ -1231,8 +1227,8 @@ function connectWebSocket() {
 function bindEvents() {
   document.querySelectorAll(".nav").forEach((button) => button.addEventListener("click", () => switchMode(button.dataset.mode)));
   $("load-latest").onclick = () => loadLatest().catch((error) => showError(error.message));
-  $("realtime-start").onchange = () => loadLatest().catch((error) => showError(error.message));
-  $("realtime-end").onchange = () => loadLatest().catch((error) => showError(error.message));
+  $("realtime-point").onchange = () => loadLatest().catch((error) => showError(error.message));
+  $("realtime-minutes").onchange = () => loadLatest().catch((error) => showError(error.message));
   $("realtime-type").onchange = () => {
     if (state.mode === "realtime") {
       renderRealtime();
@@ -1242,11 +1238,9 @@ function bindEvents() {
   $("load-density").onclick = () => loadDensity().catch((error) => showError(error.message));
   $("start").onchange = () => {
     scheduleRealtimeSummary(0);
-    scheduleViewportStats(0);
   };
   $("end").onchange = () => {
     scheduleRealtimeSummary(0);
-    scheduleViewportStats(0);
   };
   $("load-single").onclick = () => loadSingleTrack().catch((error) => showError(error.message));
   $("draw-box").onclick = drawBox;
@@ -1279,7 +1273,4 @@ function bindEvents() {
 }
 
 init();
-
-
-
 

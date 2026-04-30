@@ -20,11 +20,29 @@ class RealtimeValidationTest {
   }
 
   @Test
+  void buildsRealtimeWindowFromPointAndMinutes() {
+    RealtimeService service = service();
+    assertThat(service.realtimeWindowFromParams("2026-04-17T01:00:00.000Z", "30"))
+        .satisfies(window -> {
+          assertThat(window.start()).isEqualTo("2026-04-17 08:30:00");
+          assertThat(window.end()).isEqualTo("2026-04-17 09:00:00");
+        });
+  }
+
+  @Test
   void rejectsInvalidTimeWindowRange() {
     RealtimeService service = service();
     assertThatThrownBy(() -> service.validateTimeWindow("2026-04-17T01:00:00.000Z", "2026-04-17T00:00:00.000Z"))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("time window range is invalid");
+  }
+
+  @Test
+  void rejectsInvalidRealtimeWindowMinutes() {
+    RealtimeService service = service();
+    assertThatThrownBy(() -> service.realtimeWindowFromParams("2026-04-17T01:00:00.000Z", "0"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("realtime window minutes is invalid");
   }
 
   @Test

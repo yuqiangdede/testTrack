@@ -18,22 +18,28 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.StringJoiner;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import com.shiptrack.telemetry.RequestMetricsService;
 
 @Service
 public class ClickHouseHttpClient {
+  private static final Logger log = LoggerFactory.getLogger(ClickHouseHttpClient.class);
   private static final TypeReference<LinkedHashMap<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
   private final ObjectMapper objectMapper;
   private final HttpClient httpClient;
   private final ShipTrackConfig config;
   private final ParsedJdbc parsedJdbc;
+  private final RequestMetricsService requestMetricsService;
 
-  public ClickHouseHttpClient(ObjectMapper objectMapper, ShipConfigService configService) {
+  public ClickHouseHttpClient(ObjectMapper objectMapper, ShipConfigService configService, RequestMetricsService requestMetricsService) {
     this.objectMapper = objectMapper;
     this.httpClient = HttpClient.newBuilder().build();
     this.config = configService.config();
     this.parsedJdbc = parseJdbc(config.clickhouse.jdbcUrl);
+    this.requestMetricsService = requestMetricsService;
   }
 
   public List<Map<String, Object>> query(String sql, Map<String, Object> params) {
@@ -81,21 +87,27 @@ public class ClickHouseHttpClient {
     if (timeoutSeconds > 0) {
       request.timeout(Duration.ofSeconds(timeoutSeconds));
     }
+    long dbStart = System.nanoTime();
     try {
       HttpResponse<String> response = httpClient.send(request.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+      requestMetricsService.recordDbElapsed(System.nanoTime() - dbStart);
       if (response.statusCode() < 200 || response.statusCode() >= 300) {
         throw new ClickHouseException(response.body());
       }
       return response.body();
     } catch (IOException error) {
+      requestMetricsService.recordDbElapsed(System.nanoTime() - dbStart);
       String cause = error.getClass().getSimpleName().isBlank() ? "" : " (" + error.getClass().getSimpleName() + ")";
       String message = "ClickHouse connection failed" + cause + ". Check " + parsedJdbc.url + " and the connection settings in config/ship-track.config.json.";
+      log.error("{} timeoutSeconds={} maxExecutionTime={} endpoint={}", message, timeoutSeconds, maxExecutionTime, uri, error);
       if (wrapConnectionError) {
         throw new ClickHouseException(message, error);
       }
       throw new ClickHouseException(error.getMessage(), error);
     } catch (InterruptedException error) {
+      requestMetricsService.recordDbElapsed(System.nanoTime() - dbStart);
       Thread.currentThread().interrupt();
+      log.warn("ClickHouse request interrupted endpoint={} timeoutSeconds={} maxExecutionTime={}", uri, timeoutSeconds, maxExecutionTime, error);
       throw new ClickHouseException("ClickHouse request interrupted", error);
     }
   }

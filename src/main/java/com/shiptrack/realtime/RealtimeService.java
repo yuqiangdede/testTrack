@@ -22,6 +22,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
@@ -32,6 +34,7 @@ import org.springframework.web.socket.WebSocketSession;
 public class RealtimeService {
   private static final List<String> COMPACT_FIELDS = List.of("shipId", "shipName", "lng", "lat", "speed", "heading", "time", "isAis");
   private static final DateTimeFormatter LOCAL_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+  private static final Logger log = LoggerFactory.getLogger(RealtimeService.class);
 
   private final TrackRepository repository;
   private final ShipTrackConfig config;
@@ -40,6 +43,7 @@ public class RealtimeService {
   private final Object lock = new Object();
   private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
 
+  private Map<String, Object> databaseStats = Map.of("trackPoints", 0L, "ships", 0L);
   private boolean ready;
   private boolean warming;
   private int warmSeq;
@@ -70,28 +74,42 @@ public class RealtimeService {
   @EventListener(ApplicationReadyEvent.class)
   void warmOnStartup() {
     try {
+      warmDatabaseStats();
+    } catch (RuntimeException error) {
+      log.warn("database stats warm failed: {}", error.getMessage(), error);
+    }
+    try {
       warmLatestCache(realtimeWindowFromParams(null, null));
     } catch (RuntimeException error) {
-      System.err.println("latest cache warm failed: " + error.getMessage());
+      log.warn("latest cache warm failed: {}", error.getMessage(), error);
     }
   }
 
-  public TimeWindow realtimeWindowFromParams(String start, String end) {
-    if ((start != null && !start.isBlank()) || (end != null && !end.isBlank())) {
-      return validateTimeWindow(start, end);
+  public TimeWindow realtimeWindowFromParams(String timePoint, String minutes) {
+    if ((timePoint != null && !timePoint.isBlank()) || (minutes != null && !minutes.isBlank())) {
+      LocalDateTime endDate = parseRealtimeAnchor(timePoint);
+      int lookbackMinutes = resolveRealtimeMinutes(minutes);
+      LocalDateTime startDate = endDate.minusMinutes(lookbackMinutes);
+      return new TimeWindow(startDate.format(LOCAL_FORMAT), endDate.format(LOCAL_FORMAT));
     }
     String latest = repository.watermark();
     if (latest == null || latest.isBlank()) {
       return TimeWindow.empty();
     }
     LocalDateTime endDate = parseClickHouseLocal(latest);
-    LocalDateTime startDate = endDate.minusHours(Math.max(1, config.query.realtimeWindowHours));
+    LocalDateTime startDate = endDate.minusMinutes(Math.max(1, config.query.realtimeWindowMinutes));
     return new TimeWindow(startDate.format(LOCAL_FORMAT), endDate.format(LOCAL_FORMAT));
   }
 
   public int cachedShipCount() {
     synchronized (lock) {
       return items.size();
+    }
+  }
+
+  public Map<String, Object> databaseStats() {
+    synchronized (lock) {
+      return databaseStats;
     }
   }
 
@@ -110,7 +128,7 @@ public class RealtimeService {
         return compactLatest("memory", true, window, watermark, rows, false, cachedShipCount());
       }
     }
-    List<Map<String, Object>> fallback = repository.latest("", config.query.maxLatestShips, null, false, timeWindow.start(), timeWindow.end());
+    List<Map<String, Object>> fallback = repository.latest("", config.query.realtimeCacheMaxShips, null, false, timeWindow.start(), timeWindow.end());
     String fallbackWatermark = fallback.stream()
         .map(item -> String.valueOf(item.getOrDefault("time", "")))
         .max(String::compareTo)
@@ -141,19 +159,19 @@ public class RealtimeService {
       watermark = "";
     }
     try {
-      List<Map<String, Object>> latest = repository.latest("", config.query.maxLatestShips, null, false, timeWindow.start(), timeWindow.end());
+      List<Map<String, Object>> latest = repository.latest("", config.query.realtimeCacheMaxShips, null, false, timeWindow.start(), timeWindow.end());
       synchronized (lock) {
         if (seq != warmSeq) {
           return;
         }
         upsertLatestCache(latest);
         ready = true;
-        System.out.printf("latest cache warmed: %d ships, window=%s..%s, watermark=%s%n", items.size(), timeWindow.start(), timeWindow.end(), watermark);
+        log.info("latest cache warmed ships={} rows={} window={}..{} watermark={}", items.size(), rows.size(), timeWindow.start(), timeWindow.end(), watermark);
       }
     } catch (RuntimeException error) {
       synchronized (lock) {
         if (seq == warmSeq) {
-          System.err.println("latest cache warm failed: " + error.getMessage());
+          log.warn("latest cache warm failed: {}", error.getMessage(), error);
         }
       }
       throw error;
@@ -163,6 +181,13 @@ public class RealtimeService {
           warming = false;
         }
       }
+    }
+  }
+
+  private void warmDatabaseStats() {
+    Map<String, Object> stats = repository.databaseStats();
+    synchronized (lock) {
+      databaseStats = Map.copyOf(stats);
     }
   }
 
@@ -234,11 +259,34 @@ public class RealtimeService {
     return zoom;
   }
 
+  private LocalDateTime parseRealtimeAnchor(String value) {
+    if (value == null || value.isBlank()) {
+      String latest = repository.watermark();
+      if (latest == null || latest.isBlank()) {
+        throw new IllegalArgumentException("time point is required");
+      }
+      return parseClickHouseLocal(latest);
+    }
+    try {
+      return Instant.parse(value).atZone(ZoneOffset.ofHours(8)).toLocalDateTime();
+    } catch (RuntimeException ignored) {
+      return parseClickHouseLocal(value);
+    }
+  }
+
+  private int resolveRealtimeMinutes(String value) {
+    int minutes = value == null || value.isBlank() ? config.query.realtimeWindowMinutes : Integer.parseInt(value);
+    if (minutes < 1) {
+      throw new IllegalArgumentException("realtime window minutes is invalid");
+    }
+    return minutes;
+  }
+
   private void safePollRealtimeDeltas() {
     try {
       pollRealtimeDeltas();
     } catch (RuntimeException error) {
-      System.err.println("realtime poll failed: " + error.getMessage());
+      log.warn("realtime poll failed: {}", error.getMessage(), error);
     }
   }
 
@@ -287,6 +335,7 @@ public class RealtimeService {
     body.put("window", timeWindow);
     body.put("watermark", watermark);
     body.put("memoryShips", memoryShips);
+    body.put("memoryRows", itemRows.size());
     body.put("items", itemRows);
     body.put("nextCursor", "");
     body.put("hasMore", false);

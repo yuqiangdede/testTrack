@@ -57,11 +57,11 @@
                 </select>
               </label>
               <div class="time-grid">
-                <label>时间窗开始<input id="realtime-start" type="datetime-local" step="1" /></label>
-                <label>时间窗结束<input id="realtime-end" type="datetime-local" step="1" /></label>
+                <label>时间点<input id="realtime-point" type="datetime-local" step="1" /></label>
+                <label>前推分钟<input id="realtime-minutes" type="number" min="1" step="1" value="120" /></label>
               </div>
               <button id="load-latest" class="primary">刷新全部最新船位</button>
-              <p>服务端预热每艘船最新位置的内存缓存，缓存命中后一次性返回全部最新船位。</p>
+              <p>服务端按“时间点 - 前推分钟”构造实时窗口，预热每艘船最新位置的内存缓存，缓存命中后一次性返回全部最新船位。</p>
             </section>
             <section id="analysis-panel" class="panel-section mode-panel hidden">
               <button id="load-density" class="primary">按当前视野生成热力</button>

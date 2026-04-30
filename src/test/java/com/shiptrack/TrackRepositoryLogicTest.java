@@ -5,9 +5,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.shiptrack.clickhouse.ClickHouseHttpClient;
 import com.shiptrack.config.ShipConfigService;
 import com.shiptrack.config.ShipTrackConfig;
+import com.shiptrack.track.TrackRepository;
 import java.util.List;
 import java.util.Map;
-import com.shiptrack.track.TrackRepository;
 import org.junit.jupiter.api.Test;
 
 import static org.mockito.Mockito.mock;
@@ -52,17 +52,6 @@ class TrackRepositoryLogicTest {
     assertThat(repository.windowStats("2026-04-17T00:00:00.000Z", "2026-04-17T01:00:00.000Z"))
         .containsEntry("trackPoints", 12L)
         .containsEntry("ships", 5L);
-  }
-
-  @Test
-  void returnsViewportShips() {
-    ClickHouseHttpClient clickHouse = mock(ClickHouseHttpClient.class);
-    when(clickHouse.query(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyMap()))
-        .thenReturn(List.of(Map.of("ships", 8L)));
-    TrackRepository repository = repository(clickHouse);
-
-    assertThat(repository.viewportShips("2026-04-17T00:00:00.000Z", "2026-04-17T01:00:00.000Z", new com.shiptrack.model.BBox(100, 20, 110, 30)))
-        .isEqualTo(8L);
   }
 
   private TrackRepository repository() {

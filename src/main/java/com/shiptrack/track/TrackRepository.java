@@ -77,7 +77,7 @@ public class TrackRepository {
         ident(c.shipId));
     int limitValue = capToPage
         ? Math.min(limitOr(limit, config.query.latestPageSize), config.query.latestPageSize)
-        : Math.min(limitOr(limit, config.query.maxLatestShips), config.query.maxLatestShips);
+        : Math.min(limitOr(limit, config.query.realtimeCacheMaxShips), config.query.realtimeCacheMaxShips);
     Map<String, Object> params = params("start", start, "end", end, "afterShipId", afterShipId == null ? "" : afterShipId, "limit", limitValue);
     putBbox(params, bbox);
     return clickHouse.query(query, params);
@@ -197,29 +197,6 @@ public class TrackRepository {
   public long totalTrackPoints() {
     Map<String, Object> row = clickHouse.queryOne("SELECT count() AS points FROM %s".formatted(ident(config.tables.track)));
     return toLong(row.get("points"));
-  }
-
-  public long viewportShips(String start, String end, BBox bbox) {
-    ShipTrackConfig.Columns c = config.columns;
-    String query = """
-        SELECT
-          uniqCombined64(%s) AS ships
-        FROM %s
-        WHERE %s >= %s
-          AND %s < %s
-          AND %s BETWEEN {west: Float64} AND {east: Float64}
-          AND %s BETWEEN {south: Float64} AND {north: Float64}
-        """.formatted(
-        ident(c.shipId),
-        ident(config.tables.track),
-        ident(c.eventTime), sqlDateParam("start"),
-        ident(c.eventTime), sqlDateParam("end"),
-        ident(c.longitude),
-        ident(c.latitude));
-    List<Map<String, Object>> rows = clickHouse.query(query, params("start", start, "end", end,
-        "west", bbox.west(), "south", bbox.south(), "east", bbox.east(), "north", bbox.north()));
-    Map<String, Object> row = rows.isEmpty() ? Map.of() : rows.get(0);
-    return toLong(row.get("ships"));
   }
 
   public List<Map<String, Object>> candidates(String start, String end, BBox bbox, int limit) {
@@ -399,7 +376,7 @@ public class TrackRepository {
   }
 
   private int realtimeDeltaLimit() {
-    return Math.min(config.query.maxRealtimeDeltaShips, config.query.maxLatestShips);
+    return Math.min(config.query.maxRealtimeDeltaShips, config.query.realtimeCacheMaxShips);
   }
 
   private int limitOr(int value, int defaultValue) {
