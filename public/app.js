@@ -10,14 +10,17 @@
   selectedShips: [],
   playing: false,
   playIndex: 0,
-  speed: 2,
+  speed: 4,
   stats: {
     databaseTrackPoints: 0,
     databaseShips: 0,
     windowTrackPoints: 0,
     windowShips: 0,
-    memoryShips: 0,
+    windowHeatCells: 0,
+    viewportHeatCells: 0,
     viewportShips: 0,
+    memoryShips: 0,
+    singleTrackPoints: 0,
     summaryWindowKey: "",
     summaryTimer: null,
     summarySeq: 0
@@ -191,10 +194,16 @@ function toLocalDatetime(date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
+function toLocalDatetimeString(value) {
+  if (!value) return "";
+  const date = new Date(String(value).replace(" ", "T"));
+  return Number.isFinite(date.getTime()) ? toLocalDatetime(date) : "";
+}
+
 function realtimeWindowParams() {
   const point = $("realtime-point")?.value;
   const minutesValue = $("realtime-minutes")?.value;
-  const minutes = Number(minutesValue || 120);
+  const minutes = Number(minutesValue || 10);
   if (point && Number.isFinite(minutes) && minutes > 0) {
     return { timePoint: toIso(point), minutes };
   }
@@ -207,12 +216,69 @@ function realtimeWindowParams() {
   return null;
 }
 
+function analysisWindowParams() {
+  const point = $("analysis-point")?.value;
+  const minutesValue = $("analysis-minutes")?.value;
+  const minutes = Number(minutesValue || 10);
+  if (point && Number.isFinite(minutes) && minutes > 0) {
+    return { timePoint: toIso(point), minutes };
+  }
+  if (state.realtimeWindow?.start && state.realtimeWindow?.end) {
+    const start = new Date(String(state.realtimeWindow.start).replace(" ", "T"));
+    const end = new Date(String(state.realtimeWindow.end).replace(" ", "T"));
+    const fallbackMinutes = Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000));
+    return { timePoint: toLocalDatetime(end), minutes: fallbackMinutes };
+  }
+  return null;
+}
+
+function syncSingleWindowInputs(windowValue) {
+  if (!windowValue?.end) return;
+  const point = $("single-point");
+  if (point && !point.value) {
+    point.value = toLocalDatetimeString(windowValue.end);
+  }
+}
+
+function ensureSingleWindowDefaults() {
+  const point = $("single-point");
+  if (point && !point.value) {
+    point.value = state.realtimeWindow?.end ? toLocalDatetimeString(state.realtimeWindow.end) : toLocalDatetime(new Date());
+  }
+  const beforeHours = $("single-before-hours");
+  if (beforeHours && !beforeHours.value) beforeHours.value = "12";
+  const afterHours = $("single-after-hours");
+  if (afterHours && !afterHours.value) afterHours.value = "0";
+}
+
+function singleTrackWindowParams() {
+  ensureSingleWindowDefaults();
+  const point = $("single-point")?.value;
+  if (!point) return null;
+  const pointDate = new Date(point);
+  if (!Number.isFinite(pointDate.getTime())) return null;
+  const beforeHours = Math.max(0, Number($("single-before-hours")?.value || 12));
+  const afterHours = Math.max(0, Number($("single-after-hours")?.value || 0));
+  const start = new Date(pointDate.getTime() - beforeHours * 60 * 60 * 1000);
+  const end = new Date(pointDate.getTime() + afterHours * 60 * 60 * 1000);
+  if (start >= end) return null;
+  return { start: toIso(start), end: toIso(end) };
+}
+
 function syncRealtimeWindowInputs(windowValue) {
   if (!windowValue?.start || !windowValue?.end) return;
   const start = new Date(String(windowValue.start).replace(" ", "T"));
   const end = new Date(String(windowValue.end).replace(" ", "T"));
   $("realtime-point").value = toLocalDatetime(end);
   $("realtime-minutes").value = String(Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000)));
+}
+
+function syncAnalysisWindowInputs(windowValue) {
+  if (!windowValue?.start || !windowValue?.end) return;
+  const start = new Date(String(windowValue.start).replace(" ", "T"));
+  const end = new Date(String(windowValue.end).replace(" ", "T"));
+  $("analysis-point").value = toLocalDatetime(end);
+  $("analysis-minutes").value = String(Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000)));
 }
 
 function realtimeWindowQuery() {
@@ -454,12 +520,21 @@ function metricNumber(value) {
 }
 
 function updateMetrics() {
-  $("metric-db-points").textContent = metricNumber(state.stats.databaseTrackPoints);
-  $("metric-db-ships").textContent = metricNumber(state.stats.databaseShips);
-  $("metric-window-points").textContent = metricNumber(state.stats.windowTrackPoints);
-  $("metric-window-ships").textContent = metricNumber(state.stats.windowShips);
-  $("metric-memory-ships").textContent = metricNumber(state.stats.memoryShips);
-  $("metric-viewport-ships").textContent = metricNumber(state.stats.viewportShips);
+  $("metric-realtime-db-points").textContent = metricNumber(state.stats.databaseTrackPoints);
+  $("metric-realtime-db-ships").textContent = metricNumber(state.stats.databaseShips);
+  $("metric-realtime-window-points").textContent = metricNumber(state.stats.windowTrackPoints);
+  $("metric-realtime-window-ships").textContent = metricNumber(state.stats.windowShips);
+  $("metric-realtime-memory-ships").textContent = metricNumber(state.stats.memoryShips);
+  $("metric-realtime-viewport-ships").textContent = metricNumber(state.stats.viewportShips);
+  $("metric-analysis-db-points").textContent = metricNumber(state.stats.databaseTrackPoints);
+  $("metric-analysis-db-ships").textContent = metricNumber(state.stats.databaseShips);
+  $("metric-analysis-window-points").textContent = metricNumber(state.stats.windowTrackPoints);
+  $("metric-analysis-window-ships").textContent = metricNumber(state.stats.windowShips);
+  $("metric-analysis-window-heat-cells").textContent = metricNumber(state.stats.windowHeatCells);
+  $("metric-analysis-viewport-heat-cells").textContent = metricNumber(state.stats.viewportHeatCells);
+  $("metric-single-db-points").textContent = metricNumber(state.stats.databaseTrackPoints);
+  $("metric-single-db-ships").textContent = metricNumber(state.stats.databaseShips);
+  $("metric-single-track-points").textContent = metricNumber(state.stats.singleTrackPoints);
   $("progress").max = Math.max(0, state.trackPoints.length - 1);
   $("progress").value = state.playIndex;
   $("active-time").textContent = state.trackPoints[state.playIndex]?.time || "--";
@@ -469,26 +544,38 @@ function activeStatsWindow() {
   if (state.mode === "realtime") {
     return realtimeWindowParams();
   }
-  const start = $("start")?.value;
-  const end = $("end")?.value;
-  if (!start || !end) return null;
-  return { start: toIso(start), end: toIso(end) };
+  if (state.mode === "analysis") {
+    return analysisWindowParams();
+  }
+  if (["multi", "global"].includes(state.mode)) {
+    const start = $("start")?.value;
+    const end = $("end")?.value;
+    if (!start || !end) return null;
+    return { start: toIso(start), end: toIso(end) };
+  }
+  return null;
 }
 
 async function refreshRealtimeSummary() {
   const windowValue = activeStatsWindow();
   if (!windowValue) return;
-  const windowKey = JSON.stringify(windowValue);
-  if (windowKey === state.stats.summaryWindowKey) return;
+  const analysisMode = state.mode === "analysis";
+  const bbox = analysisMode ? currentDataBBox() : null;
+  const summaryKey = JSON.stringify({ windowValue, bbox, zoom: getMapZoom(), mode: state.mode });
+  if (summaryKey === state.stats.summaryWindowKey) return;
   const seq = ++state.stats.summarySeq;
-  const params = qs(windowValue);
+  const params = qs({ ...windowValue, zoom: getMapZoom(), ...(bbox || {}) });
   const data = await getJson(`/api/stats/realtime-summary?${params}`);
   if (seq !== state.stats.summarySeq) return;
-  state.stats.summaryWindowKey = windowKey;
+  state.stats.summaryWindowKey = summaryKey;
   state.stats.databaseTrackPoints = Number(data.databaseTrackPoints || 0);
   state.stats.databaseShips = Number(data.databaseShips || 0);
   state.stats.windowTrackPoints = Number(data.windowTrackPoints || 0);
   state.stats.windowShips = Number(data.windowShips || 0);
+  if (analysisMode) {
+    state.stats.windowHeatCells = Number(data.windowHeatCells || 0);
+    state.stats.viewportHeatCells = Number(data.viewportHeatCells || 0);
+  }
   updateMetrics();
 }
 
@@ -505,8 +592,11 @@ function switchMode(mode) {
   state.mode = mode;
   document.querySelectorAll(".nav").forEach((button) => button.classList.toggle("active", button.dataset.mode === mode));
   document.querySelectorAll(".mode-panel").forEach((panel) => panel.classList.add("hidden"));
+  $("realtime-stats-section")?.classList.toggle("hidden", mode !== "realtime");
+  $("analysis-stats-section")?.classList.toggle("hidden", mode !== "analysis");
+  $("single-stats-section")?.classList.toggle("hidden", mode !== "single");
   $(`${mode}-panel`)?.classList.remove("hidden");
-  $("time-section").classList.toggle("hidden", mode === "realtime");
+  $("time-section").classList.toggle("hidden", !["multi", "global"].includes(mode));
   $("player").classList.toggle("hidden", !["single", "multi", "global"].includes(mode));
   $("panel-title").textContent = {
     realtime: "实时位置展示",
@@ -519,6 +609,9 @@ function switchMode(mode) {
   if (mode === "realtime") renderRealtime();
   if (mode === "analysis") renderHeat();
   if (["single", "multi", "global"].includes(mode)) renderTracks();
+  if (mode !== "single") {
+    scheduleRealtimeSummary(previousMode === mode ? 0 : 120);
+  }
 }
 
 function clearLayers() {
@@ -598,8 +691,30 @@ function clearRealtimeCanvas() {
 }
 
 function canvasShipColor(item) {
-  if (Number(item.isAis) === 0) return "#6b7280";
+  if (Number(item.isAis) === 0) return "#22c55e";
   return Number(item.speed) > 8 ? "#2563eb" : "#168a52";
+}
+
+function drawRadarCircle(ctx, x, y, color) {
+  const radius = 5.5;
+  ctx.save();
+  ctx.beginPath();
+  ctx.shadowColor = "rgba(15, 23, 42, 0.22)";
+  ctx.shadowBlur = 4;
+  ctx.shadowOffsetY = 2;
+  ctx.arc(x, y, radius + 1.2, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(255,255,255,0.96)";
+  ctx.fill();
+
+  ctx.shadowColor = "transparent";
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = "rgba(15,23,42,0.35)";
+  ctx.lineWidth = 0.8;
+  ctx.stroke();
+  ctx.restore();
 }
 
 function drawShipTriangle(ctx, x, y, heading, color) {
@@ -642,12 +757,21 @@ function drawShipTriangle(ctx, x, y, heading, color) {
   ctx.restore();
 }
 
-function shipMarkerStyle(heading) {
+function shipMarkerStyle(point) {
+  if (Number(point?.isAis) === 0) {
+    return new ol.style.Style({
+      image: new ol.style.Circle({
+        radius: 6,
+        fill: new ol.style.Fill({ color: "#22c55e" }),
+        stroke: new ol.style.Stroke({ color: "rgba(255,255,255,0.96)", width: 2 })
+      })
+    });
+  }
   return new ol.style.Style({
     image: new ol.style.RegularShape({
       points: 3,
       radius: 12,
-      rotation: ((heading || 0) * Math.PI) / 180,
+      rotation: ((Number(point?.heading) || 0) * Math.PI) / 180,
       rotateWithView: true,
       fill: new ol.style.Fill({ color: "#0f62c7" }),
       stroke: new ol.style.Stroke({ color: "rgba(255,255,255,0.96)", width: 2 })
@@ -700,7 +824,8 @@ function renderRealtimeCanvas(indices) {
       const pixel = pixelFromShip(item);
       if (!pixel) continue;
       if (pixel.x < -20 || pixel.x > width + 20 || pixel.y < -20 || pixel.y > height + 20) continue;
-      drawShipTriangle(ctx, pixel.x, pixel.y, item.heading, canvasShipColor(item));
+      if (Number(item.isAis) === 0) drawRadarCircle(ctx, pixel.x, pixel.y, canvasShipColor(item));
+      else drawShipTriangle(ctx, pixel.x, pixel.y, item.heading, canvasShipColor(item));
       addRealtimeHit({ x: pixel.x, y: pixel.y, index: indices[cursor - 1] });
       drawn += 1;
       if (drawn >= REALTIME_DRAW_BATCH || performance.now() - startedAt >= REALTIME_DRAW_BUDGET_MS) break;
@@ -728,6 +853,7 @@ function renderRealtime() {
     showError("Realtime canvas failed: " + error.message);
   }
   const elapsed = Math.round(performance.now() - startedAt);
+  updateMetrics();
   setStatus(`内存缓存 ${state.latest.length.toLocaleString()} 艘，当前视野 ${indices.length.toLocaleString()} 艘，耗时 ${elapsed} ms`);
 }
 
@@ -829,7 +955,7 @@ function showShipInfo(data) {
       node.onclick = (event) => {
         event.preventDefault();
         event.stopPropagation();
-        selectRealtimeShip(data.id, data.name || data.id);
+        selectRealtimeShip(data.id, data.name || data.id, data.time);
       };
     });
   }, 0);
@@ -882,7 +1008,7 @@ function showRealtimeShipConfirm(data) {
   $("confirm-single-track").onclick = (event) => {
     event.preventDefault();
     event.stopPropagation();
-    selectRealtimeShip(data.id, data.name || data.id);
+    selectRealtimeShip(data.id, data.name || data.id, data.time);
   };
   $("cancel-single-track").onclick = (event) => {
     event.preventDefault();
@@ -892,10 +1018,13 @@ function showRealtimeShipConfirm(data) {
   setStatus(`已选中 ${data.name || data.id}，确认后查询单船轨迹`);
 }
 
-async function selectRealtimeShip(shipId, shipName) {
+async function selectRealtimeShip(shipId, shipName, shipTime) {
   if (!shipId) return;
   clearRealtimeShipConfirm();
   $("ship-id").value = shipId;
+  if (shipTime) {
+    $("single-point").value = toLocalDatetimeString(shipTime);
+  }
   setStatus(`已选中 ${shipName || shipId}，正在查询单船轨迹`);
   switchMode("single");
   try {
@@ -982,7 +1111,7 @@ function renderPlaybackMarkers() {
       geometry: new ol.geom.Point(toMapCoordinate(point)),
       point
     });
-    marker.setStyle(shipMarkerStyle(Number(point.heading || 0)));
+    marker.setStyle(shipMarkerStyle(point));
     state.layers.markerSource?.addFeature(marker);
     state.layers.markers.push(marker);
   });
@@ -995,6 +1124,8 @@ async function loadLatest() {
   const windowQuery = realtimeWindowQuery();
   const data = await getJson("/api/realtime/latest" + (windowQuery ? "?" + windowQuery : ""));
   syncRealtimeWindowInputs(data.window);
+  syncAnalysisWindowInputs(data.window);
+  syncSingleWindowInputs(data.window);
   state.realtimeWindow = data.window || null;
   buildRealtimeStore(normalizeRealtimeItems(data));
   state.stats.memoryShips = Number(data.memoryShips ?? state.latest.length ?? 0);
@@ -1010,30 +1141,59 @@ async function loadLatest() {
   updateMetrics();
   scheduleRealtimeSummary(0);
   const sourceText = data.source === "memory" ? "内存缓存" : "数据库查询";
-  setStatus(`${sourceText}已加载 ${state.latest.length.toLocaleString()} 条最新船位`);
+  setStatus(`${sourceText}已加载 ${state.latest.length.toLocaleString()} 条最新船位，当前视野 ${state.stats.viewportShips.toLocaleString()} 艘`);
 }
 
 async function loadDensity() {
   switchMode("analysis");
   setStatus("正在查询态势密度");
-  const params = qs({ start: toIso($("start").value), end: toIso($("end").value), zoom: getMapZoom(), ...currentDataBBox() });
+  const windowValue = analysisWindowParams();
+  if (!windowValue) {
+    showError("分析时间窗无效");
+    setStatus("分析时间窗无效");
+    return;
+  }
+  const params = qs({ ...windowValue, zoom: getMapZoom(), ...(currentDataBBox() || {}) });
   const data = await getJson(`/api/analysis/density?${params}`);
   state.density = data.items;
   renderHeat();
   updateMetrics();
+  scheduleRealtimeSummary(0);
   setStatus(`密度网格 ${state.density.length.toLocaleString()} 个`);
 }
 
 async function loadSingleTrack() {
+  state.trackPoints = [];
+  state.playIndex = 0;
+  state.stats.singleTrackPoints = 0;
   switchMode("single");
   setStatus("正在查询单船轨迹");
-  const params = qs({ shipId: $("ship-id").value.trim(), start: toIso($("start").value), end: toIso($("end").value), zoom: getMapZoom() });
-  const data = await getJson(`/api/tracks/single?${params}`);
+  const windowValue = singleTrackWindowParams();
+  if (!windowValue) {
+    showError("单船时间范围无效");
+    setStatus("单船时间范围无效");
+    return;
+  }
+  const params = qs({ shipId: $("ship-id").value.trim(), ...windowValue, zoom: getMapZoom() });
+  const [trackResult, statsResult] = await Promise.allSettled([
+    getJson(`/api/tracks/single?${params}`),
+    getJson("/api/stats/database")
+  ]);
+  if (trackResult.status !== "fulfilled") {
+    throw trackResult.reason;
+  }
+  const data = trackResult.value;
   state.trackPoints = data.items;
   state.playIndex = 0;
+  if (statsResult.status === "fulfilled") {
+    const stats = statsResult.value;
+    state.stats.databaseTrackPoints = Number(stats.databaseTrackPoints ?? stats.trackPoints ?? 0);
+    state.stats.databaseShips = Number(stats.databaseShips ?? stats.ships ?? 0);
+  }
+  state.stats.singleTrackPoints = state.trackPoints.length;
   renderTracks();
   updateMetrics();
-  setStatus(`单船轨迹 ${state.trackPoints.length.toLocaleString()} 个抽稀点`);
+  setStatus(`单船轨迹 ${state.stats.singleTrackPoints.toLocaleString()} 个抽稀点`);
 }
 
 async function loadCandidates(bbox = currentDataBBox()) {
@@ -1178,10 +1338,12 @@ function initMap() {
   state.map.on("pointerdrag", syncRealtimeCanvasDuringMove);
   state.map.on("moveend", () => {
     scheduleRealtimeRender();
+    if (state.mode === "analysis") scheduleRealtimeSummary();
   });
   state.map.getView().on("change:resolution", () => {
     syncRealtimeCanvasDuringMove();
     scheduleRealtimeRender();
+    if (state.mode === "analysis") scheduleRealtimeSummary();
   });
   state.map.on("pointermove", handleRealtimePointerMove);
   state.map.on("click", handleRealtimeClick);
@@ -1236,6 +1398,12 @@ function bindEvents() {
     }
   };
   $("load-density").onclick = () => loadDensity().catch((error) => showError(error.message));
+  $("analysis-point").onchange = () => {
+    scheduleRealtimeSummary(0);
+  };
+  $("analysis-minutes").onchange = () => {
+    scheduleRealtimeSummary(0);
+  };
   $("start").onchange = () => {
     scheduleRealtimeSummary(0);
   };
@@ -1243,6 +1411,21 @@ function bindEvents() {
     scheduleRealtimeSummary(0);
   };
   $("load-single").onclick = () => loadSingleTrack().catch((error) => showError(error.message));
+  $("single-point").onchange = () => {
+    if (state.mode === "single") {
+      loadSingleTrack().catch((error) => showError(error.message));
+    }
+  };
+  $("single-before-hours").onchange = () => {
+    if (state.mode === "single") {
+      loadSingleTrack().catch((error) => showError(error.message));
+    }
+  };
+  $("single-after-hours").onchange = () => {
+    if (state.mode === "single") {
+      loadSingleTrack().catch((error) => showError(error.message));
+    }
+  };
   $("draw-box").onclick = drawBox;
   $("load-candidates").onclick = () => loadCandidates().catch((error) => showError(error.message));
   $("load-multi").onclick = () => loadMultiTrack().catch((error) => showError(error.message));

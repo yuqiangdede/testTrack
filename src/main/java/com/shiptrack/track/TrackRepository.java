@@ -116,6 +116,39 @@ public class TrackRepository {
         "ships", toLong(row.get("ships")));
   }
 
+  public long densityCellCount(String start, String end, BBox bbox, int zoom) {
+    ShipTrackConfig.Columns c = config.columns;
+    double grid = densityGridSizeDegrees(zoom);
+    String bboxFilter = bbox == null ? "" : """
+        AND %s BETWEEN {west: Float64} AND {east: Float64}
+        AND %s BETWEEN {south: Float64} AND {north: Float64}
+        """.formatted(ident(c.longitude), ident(c.latitude));
+    Map<String, Object> params = params("start", start, "end", end, "grid", grid);
+    putBbox(params, bbox);
+    List<Map<String, Object>> rows = clickHouse.query("""
+        SELECT count() AS cells
+        FROM
+        (
+          SELECT
+            floor(%s / {grid: Float64}) * {grid: Float64} + ({grid: Float64} / 2) AS lng,
+            floor(%s / {grid: Float64}) * {grid: Float64} + ({grid: Float64} / 2) AS lat
+          FROM %s
+          WHERE %s >= %s
+            AND %s < %s
+            %s
+          GROUP BY lng, lat
+        ) AS density_cells
+        """.formatted(
+        ident(c.longitude),
+        ident(c.latitude),
+        ident(config.tables.track),
+        ident(c.eventTime), sqlDateParam("start"),
+        ident(c.eventTime), sqlDateParam("end"),
+        bboxFilter), params);
+    Map<String, Object> row = rows.isEmpty() ? Map.of() : rows.get(0);
+    return toLong(row.get("cells"));
+  }
+
   public String watermark() {
     ShipTrackConfig.Columns c = config.columns;
     Map<String, Object> row = clickHouse.queryOne("SELECT toString(max(%s)) AS time FROM %s".formatted(ident(c.eventTime), ident(config.tables.track)));

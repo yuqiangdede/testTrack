@@ -42,7 +42,7 @@ public class ShipTrackConfig {
 
   public static class Query {
     public int latestLookbackHours = 5;
-    public int realtimeWindowMinutes = 120;
+    public int realtimeWindowMinutes = 10;
     public int realtimePollSeconds = 5;
     public int clickhouseTimeoutSeconds = 30;
     public int latestPageSize = 30000;

@@ -54,6 +54,17 @@ class TrackRepositoryLogicTest {
         .containsEntry("ships", 5L);
   }
 
+  @Test
+  void returnsDensityCellCount() {
+    ClickHouseHttpClient clickHouse = mock(ClickHouseHttpClient.class);
+    when(clickHouse.query(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyMap()))
+        .thenReturn(List.of(Map.of("cells", 88L)));
+    TrackRepository repository = repository(clickHouse);
+
+    assertThat(repository.densityCellCount("2026-04-17T00:00:00.000Z", "2026-04-17T01:00:00.000Z", null, 8))
+        .isEqualTo(88L);
+  }
+
   private TrackRepository repository() {
     return repository(mock(ClickHouseHttpClient.class));
   }

@@ -32,15 +32,34 @@
             <div id="ship-hover-card" class="ship-hover-card hidden"></div>
           </div>
           <aside class="panel">
-            <section class="panel-section">
+            <section id="realtime-stats-section" class="panel-section">
               <h2 id="panel-title">实时位置展示</h2>
               <div class="metric-grid">
-                <div class="metric"><span>数据库轨迹点总量</span><strong id="metric-db-points">0</strong></div>
-                <div class="metric"><span>数据库船舶总量</span><strong id="metric-db-ships">0</strong></div>
-                <div class="metric"><span>当前时间窗轨迹点总量</span><strong id="metric-window-points">0</strong></div>
-                <div class="metric"><span>当前时间窗船舶总量</span><strong id="metric-window-ships">0</strong></div>
-                <div class="metric"><span>内存缓存船舶总量</span><strong id="metric-memory-ships">0</strong></div>
-                <div class="metric"><span>当前视野船舶数量</span><strong id="metric-viewport-ships">0</strong></div>
+                <div class="metric"><span>数据库轨迹点总量</span><strong id="metric-realtime-db-points">0</strong></div>
+                <div class="metric"><span>数据库船舶总量</span><strong id="metric-realtime-db-ships">0</strong></div>
+                <div class="metric"><span>当前时间窗轨迹点总量</span><strong id="metric-realtime-window-points">0</strong></div>
+                <div class="metric"><span>当前时间窗船舶总量</span><strong id="metric-realtime-window-ships">0</strong></div>
+                <div class="metric"><span>内存缓存船舶总量</span><strong id="metric-realtime-memory-ships">0</strong></div>
+                <div class="metric"><span>当前视野船舶数量</span><strong id="metric-realtime-viewport-ships">0</strong></div>
+              </div>
+            </section>
+            <section id="analysis-stats-section" class="panel-section hidden">
+              <h2>态势分析统计</h2>
+              <div class="metric-grid">
+                <div class="metric"><span>数据库轨迹点总量</span><strong id="metric-analysis-db-points">0</strong></div>
+                <div class="metric"><span>数据库船舶总量</span><strong id="metric-analysis-db-ships">0</strong></div>
+                <div class="metric"><span>当前时间窗轨迹点总量</span><strong id="metric-analysis-window-points">0</strong></div>
+                <div class="metric"><span>当前时间窗船舶总量</span><strong id="metric-analysis-window-ships">0</strong></div>
+                <div class="metric"><span>当前时间窗轨迹点热度区域数量</span><strong id="metric-analysis-window-heat-cells">0</strong></div>
+                <div class="metric"><span>当前时间窗+当前视野轨迹点热度区域数量</span><strong id="metric-analysis-viewport-heat-cells">0</strong></div>
+              </div>
+            </section>
+            <section id="single-stats-section" class="panel-section hidden">
+              <h2>单船轨迹统计</h2>
+              <div class="metric-grid">
+                <div class="metric"><span>数据库轨迹点总量</span><strong id="metric-single-db-points">0</strong></div>
+                <div class="metric"><span>数据库船舶总量</span><strong id="metric-single-db-ships">0</strong></div>
+                <div class="metric"><span>当前船轨迹点数量</span><strong id="metric-single-track-points">0</strong></div>
               </div>
             </section>
             <section id="time-section" class="panel-section hidden">
@@ -58,18 +77,31 @@
               </label>
               <div class="time-grid">
                 <label>时间点<input id="realtime-point" type="datetime-local" step="1" /></label>
-                <label>前推分钟<input id="realtime-minutes" type="number" min="1" step="1" value="120" /></label>
+                <label>前推分钟<input id="realtime-minutes" type="number" min="1" step="1" value="10" /></label>
               </div>
               <button id="load-latest" class="primary">刷新全部最新船位</button>
               <p>服务端按“时间点 - 前推分钟”构造实时窗口，预热每艘船最新位置的内存缓存，缓存命中后一次性返回全部最新船位。</p>
             </section>
             <section id="analysis-panel" class="panel-section mode-panel hidden">
+              <div class="time-grid">
+                <label>时间点<input id="analysis-point" type="datetime-local" step="1" /></label>
+                <label>前推分钟<input id="analysis-minutes" type="number" min="1" step="1" value="10" /></label>
+              </div>
               <button id="load-density" class="primary">按当前视野生成热力</button>
               <p>服务端按 bbox、时间窗和 zoom 聚合密度点，不返回海量原始点。</p>
             </section>
             <section id="single-panel" class="panel-section mode-panel hidden">
               <h3>船舶选择</h3>
               <label>船舶编号<input id="ship-id" value="LIAOCHANGYUYANG61659" /></label>
+              <div class="time-grid">
+                <label>时间点<input id="single-point" type="datetime-local" step="1" /></label>
+                <label>向前小时<input id="single-before-hours" type="number" min="0" step="1" value="12" /></label>
+              </div>
+              <div class="time-grid">
+                <label>向后小时<input id="single-after-hours" type="number" min="0" step="1" value="0" /></label>
+                <div></div>
+              </div>
+              <p>默认按实时位置带入的时间点，向前 12 小时、向后 0 小时回放，可按需要修改。</p>
               <button id="load-single" class="primary">查询单船轨迹</button>
             </section>
             <section id="multi-panel" class="panel-section mode-panel hidden">
@@ -94,9 +126,11 @@
                 <button id="stop" class="round">■</button>
                 <select id="speed">
                   <option value="1">1x</option>
-                  <option value="2" selected>2x</option>
-                  <option value="5">5x</option>
-                  <option value="10">10x</option>
+                  <option value="4" selected>4x</option>
+                  <option value="8">8x</option>
+                  <option value="16">16x</option>
+                  <option value="64">64x</option>
+                  <option value="256">256x</option>
                 </select>
               </div>
               <input id="progress" type="range" min="0" max="0" value="0" />

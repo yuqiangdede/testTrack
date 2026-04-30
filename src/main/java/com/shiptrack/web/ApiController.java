@@ -66,26 +66,46 @@ public class ApiController {
 
   @GetMapping("/api/stats/realtime-summary")
   public Map<String, Object> realtimeSummary(@RequestParam(required = false) String start, @RequestParam(required = false) String end,
-      @RequestParam(required = false) String timePoint, @RequestParam(required = false) String minutes) {
+      @RequestParam(required = false) String timePoint, @RequestParam(required = false) String minutes,
+      @RequestParam(required = false) String west, @RequestParam(required = false) String south,
+      @RequestParam(required = false) String east, @RequestParam(required = false) String north,
+      @RequestParam(required = false) String zoom) {
     return trace("/api/stats/realtime-summary", () -> {
       TimeWindow timeWindow = realtimeWindow(start, end, timePoint, minutes);
       Map<String, Object> database = realtimeService.databaseStats();
       Map<String, Object> window = timeWindow.start().isBlank() || timeWindow.end().isBlank()
           ? Map.of("trackPoints", 0L, "ships", 0L)
           : repository.windowStats(timeWindow.start(), timeWindow.end());
+      int zoomValue = realtimeService.validateZoom(zoom);
+      BBox bbox = bboxOrNull(west, south, east, north);
+      long windowHeatCells = timeWindow.start().isBlank() || timeWindow.end().isBlank()
+          ? 0
+          : repository.densityCellCount(timeWindow.start(), timeWindow.end(), null, zoomValue);
+      long viewportHeatCells = timeWindow.start().isBlank() || timeWindow.end().isBlank() || bbox == null
+          ? 0
+          : repository.densityCellCount(timeWindow.start(), timeWindow.end(), bbox, zoomValue);
       return Map.of(
           "databaseTrackPoints", database.get("trackPoints"),
           "databaseShips", database.get("ships"),
           "windowTrackPoints", window.get("trackPoints"),
-          "windowShips", window.get("ships"));
+          "windowShips", window.get("ships"),
+          "windowHeatCells", windowHeatCells,
+          "viewportHeatCells", viewportHeatCells);
     });
   }
 
+  @GetMapping("/api/stats/database")
+  public Map<String, Object> databaseStats() {
+    return trace("/api/stats/database", repository::databaseStats);
+  }
+
   @GetMapping("/api/analysis/density")
-  public Map<String, Object> density(@RequestParam String start, @RequestParam String end, @RequestParam String west,
-      @RequestParam String south, @RequestParam String east, @RequestParam String north, @RequestParam(required = false) String zoom) {
+  public Map<String, Object> density(@RequestParam(required = false) String start, @RequestParam(required = false) String end,
+      @RequestParam(required = false) String timePoint, @RequestParam(required = false) String minutes,
+      @RequestParam String west, @RequestParam String south, @RequestParam String east, @RequestParam String north,
+      @RequestParam(required = false) String zoom) {
     return trace("/api/analysis/density", () -> {
-      TimeWindow time = realtimeService.validateTimeWindow(start, end);
+      TimeWindow time = realtimeWindow(start, end, timePoint, minutes);
       BBox bbox = bbox(west, south, east, north);
       return Map.of("items", repository.density(time.start(), time.end(), bbox, realtimeService.validateZoom(zoom)));
     });
@@ -142,6 +162,13 @@ public class ApiController {
     return bbox;
   }
 
+  private BBox bboxOrNull(String west, String south, String east, String north) {
+    if (west == null || west.isBlank() || south == null || south.isBlank() || east == null || east.isBlank() || north == null || north.isBlank()) {
+      return null;
+    }
+    return bbox(west, south, east, north);
+  }
+
   private TimeWindow realtimeWindow(String start, String end, String timePoint, String minutes) {
     if ((timePoint != null && !timePoint.isBlank()) || (minutes != null && !minutes.isBlank())) {
       return realtimeService.realtimeWindowFromParams(timePoint, minutes);
@@ -183,10 +210,16 @@ public class ApiController {
             endpoint, elapsedMs, dbElapsedMs, metrics.dbCalls(), items, source, ready, warming, memoryShips, memoryRows, watermark);
         return;
       }
+      if (map.containsKey("trackPoints") && map.containsKey("ships") && !map.containsKey("windowTrackPoints")) {
+        log.info("api request ok endpoint={} elapsedMs={} dbElapsedMs={} dbCalls={} trackPoints={} ships={}",
+            endpoint, elapsedMs, dbElapsedMs, metrics.dbCalls(), map.get("trackPoints"), map.get("ships"));
+        return;
+      }
       if (map.containsKey("databaseTrackPoints") || map.containsKey("windowTrackPoints")) {
-        log.info("api request ok endpoint={} elapsedMs={} dbElapsedMs={} dbCalls={} databaseTrackPoints={} databaseShips={} windowTrackPoints={} windowShips={}",
+        log.info("api request ok endpoint={} elapsedMs={} dbElapsedMs={} dbCalls={} databaseTrackPoints={} databaseShips={} windowTrackPoints={} windowShips={} windowHeatCells={} viewportHeatCells={}",
             endpoint, elapsedMs, dbElapsedMs, metrics.dbCalls(),
-            map.get("databaseTrackPoints"), map.get("databaseShips"), map.get("windowTrackPoints"), map.get("windowShips"));
+            map.get("databaseTrackPoints"), map.get("databaseShips"), map.get("windowTrackPoints"), map.get("windowShips"),
+            map.get("windowHeatCells"), map.get("viewportHeatCells"));
         return;
       }
     }
