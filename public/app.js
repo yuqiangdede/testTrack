@@ -1539,12 +1539,18 @@ function showRealtimeShipConfirm(data) {
     card.style.left = `${Math.round(pixel[0] + 14)}px`;
     card.style.top = `${Math.round(pixel[1] + 14)}px`;
   }
-  $("confirm-single-track").onclick = (event) => {
+  const confirmButton = card.querySelector("#confirm-single-track");
+  const cancelButton = card.querySelector("#cancel-single-track");
+  if (!confirmButton || !cancelButton) {
+    console.error("Single-track confirm card buttons were not rendered");
+    return;
+  }
+  confirmButton.onclick = (event) => {
     event.preventDefault();
     event.stopPropagation();
     selectRealtimeShip(data.id, data.name || data.id, data.time);
   };
-  $("cancel-single-track").onclick = (event) => {
+  cancelButton.onclick = (event) => {
     event.preventDefault();
     event.stopPropagation();
     clearRealtimeShipConfirm();
