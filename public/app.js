@@ -1941,12 +1941,11 @@ function renderCandidateDrawer() {
   const pageCount = pages.length;
   const currentItems = candidatePageItems(currentPage);
   $("candidate-loaded-pages").textContent = String(pageCount);
-  $("candidate-page-size").textContent = String(CANDIDATE_PAGE_SIZE);
   $("candidate-total-pages").textContent = String(pageCount);
   $("candidate-current-page").textContent = String(currentPage);
   $("candidate-total-loaded").textContent = String(loadedCandidateItems().length);
   $("candidate-selected-count").textContent = String(state.multi.selectedShips.length);
-  $("candidate-query-elapsed").textContent = state.multi.candidateQueryElapsedMs == null ? "--" : `${state.multi.candidateQueryElapsedMs} ms`;
+  $("candidate-query-elapsed").textContent = state.multi.candidateQueryElapsedMs == null ? "--" : `${state.multi.candidateQueryElapsedMs} m`;
   $("candidate-prev-page").disabled = currentPage <= 1;
   $("candidate-next-page").disabled = currentPage >= pageCount;
   $("candidate-more-pages").disabled = state.multi.candidateLoading || !state.multi.candidateHasMore;
