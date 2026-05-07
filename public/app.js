@@ -130,6 +130,7 @@ const API_TRACE_MAX_HISTORY = 3;
 const API_TRACE_HIDDEN_KEY = "shiptrack.apiTrace.hidden";
 const statsRequestCache = new Map();
 const PLAYBACK_SPEED_OPTIONS = [1, 2, 4, 8, 16, 64, 128];
+const DEFAULT_GLOBAL_REPLAY_TIME = "2026-04-19T21:00:00";
 const TRACK_LINE_OPACITY = 0.24;
 const PLAYBACK_LINE_OPACITY = 0.96;
 const AIS_SHIP_FILL = "rgba(34, 197, 94, 0.75)";
@@ -475,7 +476,7 @@ function analysisWindowParams() {
 function ensureGlobalWindowDefaults() {
   const point = $("global-point");
   if (point && !point.value) {
-    point.value = toLocalDatetime(new Date());
+    point.value = DEFAULT_GLOBAL_REPLAY_TIME;
   }
   const hours = $("global-hours");
   if (hours && !hours.value) {
