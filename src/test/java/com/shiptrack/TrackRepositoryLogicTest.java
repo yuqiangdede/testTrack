@@ -233,7 +233,10 @@ class TrackRepositoryLogicTest {
     ArgumentCaptor<Map<String, Object>> paramsCaptor = ArgumentCaptor.forClass(Map.class);
     verify(clickHouse).query(sqlCaptor.capture(), paramsCaptor.capture());
     assertThat(sqlCaptor.getValue()).contains("WHERE shipType = 'ais'");
-    assertThat(sqlCaptor.getValue()).contains("ifNull(type.isAis, 0) AS isAis");
+    assertThat(sqlCaptor.getValue()).contains("argMax(`ship_name`, `bucket_start`) AS shipName");
+    assertThat(sqlCaptor.getValue()).contains("argMax(`isAis`, `bucket_start`) AS isAis");
+    assertThat(sqlCaptor.getValue()).doesNotContain("tb_ais_event_simple_info");
+    assertThat(sqlCaptor.getValue()).doesNotContain("LEFT JOIN");
     assertThat(sqlCaptor.getValue()).doesNotContain("match(toString(base.shipId)");
     assertThat(sqlCaptor.getValue()).contains("LIMIT {limit: UInt32} OFFSET {offset: UInt32}");
     assertThat(paramsCaptor.getValue()).containsEntry("limit", 1000).containsEntry("offset", 1000);

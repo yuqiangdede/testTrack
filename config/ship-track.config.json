@@ -23,7 +23,9 @@
     "minLng": "min_lng",
     "maxLng": "max_lng",
     "minLat": "min_lat",
-    "maxLat": "max_lat"
+    "maxLat": "max_lat",
+    "shipName": "ship_name",
+    "isAis": "isAis"
   },
   "query": {
     "latestLookbackHours": 5,

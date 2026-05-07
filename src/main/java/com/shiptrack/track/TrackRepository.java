@@ -283,7 +283,6 @@ public class TrackRepository {
 
   public List<Map<String, Object>> candidates(String start, String end, BBox bbox, int page, int pageSize, List<String> shipTypes) {
     ShipTrackConfig.BucketIndexColumns ic = config.bucketIndexColumns;
-    ShipTrackConfig.Columns c = config.columns;
     int limit = Math.max(1, Math.min(pageSize, config.query.maxCandidateBatchSize));
     int offset = Math.max(0, (Math.max(1, page) - 1) * limit);
     List<String> normalizedTypes = normalizeShipTypes(shipTypes);
@@ -293,6 +292,8 @@ public class TrackRepository {
           base AS (
             SELECT
               %s AS shipId,
+              argMax(%s, %s) AS shipName,
+              argMax(%s, %s) AS isAis,
               toString(min(%s)) AS firstTime,
               toString(max(%s)) AS lastTime,
               count() AS points
@@ -307,26 +308,14 @@ public class TrackRepository {
           ),
           typed AS (
             SELECT
-              base.shipId AS shipId,
-              base.firstTime AS firstTime,
-              base.lastTime AS lastTime,
-              base.points AS points,
-              ifNull(type.isAis, 0) AS isAis,
-              if(ifNull(type.isAis, 0) = 1, 'ais', 'radar') AS shipType,
-              ifNull(type.shipName, '') AS shipName
+              shipId,
+              ifNull(shipName, '') AS shipName,
+              firstTime,
+              lastTime,
+              points,
+              ifNull(isAis, 0) AS isAis,
+              if(ifNull(isAis, 0) = 1, 'ais', 'radar') AS shipType
             FROM base
-            LEFT JOIN
-            (
-              SELECT
-                %s AS shipId,
-                argMax(%s, %s) AS shipName,
-                argMax(isAis, %s) AS isAis
-              FROM %s
-              WHERE %s >= %s
-                AND %s < %s
-                AND %s IN (SELECT shipId FROM base)
-              GROUP BY %s
-            ) AS type USING (shipId)
           )
         SELECT
           shipId,
@@ -342,6 +331,8 @@ public class TrackRepository {
         LIMIT {limit: UInt32} OFFSET {offset: UInt32}
         """.formatted(
         ident(ic.shipId),
+        ident(ic.shipName), ident(ic.bucketStart),
+        ident(ic.isAis), ident(ic.bucketStart),
         ident(ic.bucketStart),
         ident(ic.bucketStart),
         ident(config.tables.bucketIndex),
@@ -352,14 +343,6 @@ public class TrackRepository {
         ident(ic.maxLat),
         ident(ic.minLat),
         ident(ic.shipId),
-        ident(c.shipId),
-        ident(c.shipName), ident(c.eventTime),
-        ident(c.eventTime),
-        ident(config.tables.track),
-        ident(c.eventTime), sqlDateParam("start"),
-        ident(c.eventTime), sqlDateParam("end"),
-        ident(c.shipId),
-        ident(c.shipId),
         typeFilter);
     Map<String, Object> params = params("start", start, "end", end, "limit", limit, "offset", offset);
     putBbox(params, bbox);

@@ -38,6 +38,8 @@ public class ShipTrackConfig {
     public String maxLng = "max_lng";
     public String minLat = "min_lat";
     public String maxLat = "max_lat";
+    public String shipName = "ship_name";
+    public String isAis = "isAis";
   }
 
   public static class Query {
