@@ -43,6 +43,12 @@
     mode: "auto",
     bucketSeconds: 60
   },
+  playback: {
+    performanceMode: true,
+    prepared: false,
+    groupedTracks: [],
+    shipRuntime: new Map()
+  },
   stats: {
     databaseTrackPoints: 0,
     databaseShips: 0,
@@ -131,6 +137,7 @@ const API_TRACE_HIDDEN_KEY = "shiptrack.apiTrace.hidden";
 const statsRequestCache = new Map();
 const PLAYBACK_SPEED_OPTIONS = [1, 2, 4, 8, 16, 64, 128];
 const DEFAULT_GLOBAL_REPLAY_TIME = "2026-04-19T21:00:00";
+const TRACK_PALETTE = ["#2563eb", "#16a34a", "#dc2626", "#d97706", "#7c3aed", "#0891b2", "#be123c"];
 const TRACK_LINE_OPACITY = 0.24;
 const PLAYBACK_LINE_OPACITY = 0.96;
 const AIS_SHIP_FILL = "rgba(34, 197, 94, 0.75)";
@@ -534,6 +541,12 @@ function syncSamplingControls() {
   }
 }
 
+function syncPlaybackPerformanceControls() {
+  const input = $("playback-performance-mode");
+  if (!input) return;
+  input.checked = Boolean(state.playback.performanceMode);
+}
+
 function activeSamplingParams() {
   syncSamplingControls();
   return {
@@ -625,6 +638,142 @@ function groupByShip(points) {
   });
   grouped.forEach((items) => items.sort((a, b) => String(a.time).localeCompare(String(b.time))));
   return grouped;
+}
+
+function resetPlaybackRuntime() {
+  state.playback.prepared = false;
+  state.playback.groupedTracks = [];
+  state.playback.shipRuntime = new Map();
+  state.layers.playbackTrackSource?.clear();
+  state.layers.markerSource?.clear();
+  state.layers.markers = [];
+}
+
+function isPlaybackMode() {
+  return ["single", "multi", "global"].includes(state.mode);
+}
+
+function playbackLineWidth() {
+  return state.mode === "global" ? 2.5 : 4.5;
+}
+
+function preparePlaybackRuntime() {
+  resetPlaybackRuntime();
+  if (!state.map || !state.trackPoints.length) return;
+  state.trackPoints.forEach((point, globalIndex) => {
+    point._playbackIndex = globalIndex;
+    point._mapCoordinate = toMapCoordinate(point);
+  });
+  state.playback.groupedTracks = Array.from(groupByShip(state.trackPoints).entries()).map(([ship, points], index) => {
+    const color = TRACK_PALETTE[index % TRACK_PALETTE.length];
+    const lineFeature = new ol.Feature({
+      geometry: new ol.geom.LineString([]),
+      ship,
+      points: 0
+    });
+    lineFeature.setStyle(new ol.style.Style({
+      stroke: new ol.style.Stroke({
+        color: withOpacity(color, PLAYBACK_LINE_OPACITY),
+        width: playbackLineWidth(),
+        lineJoin: "round",
+        lineCap: "round"
+      })
+    }));
+    const markerFeature = new ol.Feature({ point: null });
+    state.playback.shipRuntime.set(ship, {
+      ship,
+      points,
+      cursor: -1,
+      playedCoordinates: [],
+      lineFeature,
+      markerFeature,
+      lineAdded: false,
+      markerAdded: false
+    });
+    return { ship, points, index, color };
+  });
+  state.playback.prepared = true;
+}
+
+function findPlaybackCursor(points, playIndex) {
+  let low = 0;
+  let high = points.length - 1;
+  let cursor = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    if (Number(points[mid]._playbackIndex) <= playIndex) {
+      cursor = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return cursor;
+}
+
+function setPlaybackRuntimeCursor(runtime, cursor) {
+  if (!runtime || runtime.cursor === cursor) return;
+  const previousCursor = runtime.cursor;
+  runtime.cursor = cursor;
+  const activePoint = cursor >= 0 ? runtime.points[cursor] : null;
+  if (cursor < 0) {
+    runtime.playedCoordinates = [];
+  } else if (cursor === previousCursor + 1 && runtime.playedCoordinates.length === cursor) {
+    runtime.playedCoordinates.push(activePoint._mapCoordinate);
+  } else {
+    runtime.playedCoordinates = runtime.points.slice(0, cursor + 1).map((point) => point._mapCoordinate);
+  }
+  if (cursor >= 1) {
+    runtime.lineFeature.getGeometry().setCoordinates(runtime.playedCoordinates);
+    runtime.lineFeature.set("points", cursor + 1);
+    if (!runtime.lineAdded) {
+      state.layers.playbackTrackSource?.addFeature(runtime.lineFeature);
+      runtime.lineAdded = true;
+    }
+  } else if (runtime.lineAdded) {
+    state.layers.playbackTrackSource?.removeFeature(runtime.lineFeature);
+    runtime.lineAdded = false;
+  }
+  if (activePoint) {
+    runtime.markerFeature.setGeometry(new ol.geom.Point(activePoint._mapCoordinate));
+    runtime.markerFeature.set("point", activePoint);
+    runtime.markerFeature.setStyle(shipMarkerStyle(activePoint));
+    if (!runtime.markerAdded) {
+      state.layers.markerSource?.addFeature(runtime.markerFeature);
+      runtime.markerAdded = true;
+      state.layers.markers.push(runtime.markerFeature);
+    }
+  } else if (runtime.markerAdded) {
+    state.layers.markerSource?.removeFeature(runtime.markerFeature);
+    runtime.markerAdded = false;
+    state.layers.markers = state.layers.markers.filter((feature) => feature !== runtime.markerFeature);
+  }
+}
+
+function syncIncrementalPlaybackToIndex(playIndex) {
+  if (!state.playback.prepared) preparePlaybackRuntime();
+  state.playback.groupedTracks.forEach(({ ship, points }) => {
+    setPlaybackRuntimeCursor(state.playback.shipRuntime.get(ship), findPlaybackCursor(points, playIndex));
+  });
+}
+
+function advanceIncrementalPlayback(previousIndex, nextIndex) {
+  if (!state.playback.prepared || nextIndex < previousIndex) {
+    syncIncrementalPlaybackToIndex(nextIndex);
+    return;
+  }
+  for (let index = previousIndex + 1; index <= nextIndex; index += 1) {
+    const point = state.trackPoints[index];
+    if (!point) continue;
+    const runtime = state.playback.shipRuntime.get(point.shipId);
+    if (!runtime) continue;
+    const nextCursor = runtime.cursor + 1;
+    if (runtime.points[nextCursor]?._playbackIndex === index) {
+      setPlaybackRuntimeCursor(runtime, nextCursor);
+    } else {
+      setPlaybackRuntimeCursor(runtime, findPlaybackCursor(runtime.points, nextIndex));
+    }
+  }
 }
 
 function normalizeRealtimeItem(item) {
@@ -1070,6 +1219,7 @@ function resetTrackPlaybackState() {
   state.playing = false;
   state.playIndex = 0;
   state.trackPoints = [];
+  resetPlaybackRuntime();
   state.stats.singleStatsSeq += 1;
   state.stats.singleRawTrackPoints = 0;
   state.stats.singleSampledTrackPoints = 0;
@@ -1098,6 +1248,7 @@ function syncPlayButtons() {
     }
     speedSelect.value = String(normalizedSpeed);
   }
+  syncPlaybackPerformanceControls();
 }
 
 function pausePlayback() {
@@ -1153,7 +1304,7 @@ function switchMode(mode) {
   $(`${mode}-panel`)?.classList.remove("hidden");
   $("time-section").classList.toggle("hidden", mode !== "multi");
   $("player").classList.toggle("hidden", !["single", "multi", "global"].includes(mode));
-  if (["single", "multi", "global"].includes(mode)) {
+  if (isPlaybackMode()) {
     syncSamplingControls();
   }
   $("panel-title").textContent = {
@@ -1166,7 +1317,7 @@ function switchMode(mode) {
   clearLayers();
   if (mode === "realtime") renderRealtime();
   if (mode === "analysis") renderHeat();
-  if (["single", "multi", "global"].includes(mode)) renderTracks();
+  if (isPlaybackMode()) renderTracks();
   renderCandidateDrawer();
   if (previousMode === "global" && mode !== "global" && state.global.stats.summaryTimer) {
     clearTimeout(state.global.stats.summaryTimer);
@@ -1195,6 +1346,7 @@ function clearLayers() {
   state.layers.trackSource?.clear();
   state.layers.playbackTrackSource?.clear();
   state.layers.markerSource?.clear();
+  if (!isPlaybackMode()) resetPlaybackRuntime();
   if (state.mode !== "multi") state.layers.rectangleSource?.clear();
   if (state.mode !== "realtime") {
     clearRealtimeShipConfirm();
@@ -1671,8 +1823,8 @@ function renderTracks() {
   state.layers.trackSource?.clear();
   state.layers.playbackTrackSource?.clear();
   state.layers.lines = [];
-  const palette = ["#2563eb", "#16a34a", "#dc2626", "#d97706", "#7c3aed", "#0891b2", "#be123c"];
-  state.layers.lineQueue = Array.from(groupByShip(state.trackPoints).entries()).map(([ship, points], index) => ({ ship, points, index, palette }));
+  preparePlaybackRuntime();
+  state.layers.lineQueue = state.playback.groupedTracks.map(({ ship, points, index }) => ({ ship, points, index, palette: TRACK_PALETTE }));
   drawLineBatch();
   renderPlaybackMarkers();
 }
@@ -1681,7 +1833,7 @@ function drawLineBatch() {
   state.layers.lineTimer = null;
   const batch = state.layers.lineQueue.splice(0, state.mode === "global" ? 120 : 30);
   batch.forEach(({ ship, points, index, palette }) => {
-    const path = points.map(toMapCoordinate);
+    const path = points.map((point) => point._mapCoordinate || toMapCoordinate(point));
     if (path.length < 2) return;
     const line = new ol.Feature({
       geometry: new ol.geom.LineString(path),
@@ -1711,19 +1863,18 @@ function updatePlaybackTrail() {
   state.layers.playbackTrackSource?.clear();
   const visible = state.trackPoints.slice(0, Math.max(1, state.playIndex + 1));
   if (visible.length < 2) return;
-  const palette = ["#2563eb", "#16a34a", "#dc2626", "#d97706", "#7c3aed", "#0891b2", "#be123c"];
   const batchWidth = state.mode === "global" ? 2.5 : 4.5;
   const grouped = Array.from(groupByShip(visible).entries());
   grouped.forEach(([ship, points], index) => {
     if (points.length < 2) return;
     const line = new ol.Feature({
-      geometry: new ol.geom.LineString(points.map(toMapCoordinate)),
+      geometry: new ol.geom.LineString(points.map((point) => point._mapCoordinate || toMapCoordinate(point))),
       ship,
       points: points.length
     });
     line.setStyle(new ol.style.Style({
       stroke: new ol.style.Stroke({
-        color: withOpacity(palette[index % palette.length], PLAYBACK_LINE_OPACITY),
+        color: withOpacity(TRACK_PALETTE[index % TRACK_PALETTE.length], PLAYBACK_LINE_OPACITY),
         width: batchWidth,
         lineJoin: "round",
         lineCap: "round"
@@ -1735,8 +1886,17 @@ function updatePlaybackTrail() {
 
 function renderPlaybackMarkers() {
   if (!state.map || !["single", "multi", "global"].includes(state.mode)) return;
+  if (state.playback.performanceMode) {
+    syncIncrementalPlaybackToIndex(state.playIndex);
+    updateMetrics();
+    return;
+  }
   state.layers.markerSource?.clear();
   state.layers.markers = [];
+  state.playback.shipRuntime.forEach((runtime) => {
+    runtime.lineAdded = false;
+    runtime.markerAdded = false;
+  });
   const visible = state.trackPoints.slice(0, Math.max(1, state.playIndex + 1));
   const grouped = Array.from(groupByShip(visible).entries());
   grouped.forEach(([, points]) => {
@@ -2295,9 +2455,15 @@ async function loadGlobalSegment() {
 function tickPlayer() {
   if (state.playing && state.trackPoints.length) {
     try {
+      const previousIndex = state.playIndex;
       state.playIndex = Math.min(state.trackPoints.length - 1, state.playIndex + 1);
       $("progress").value = state.playIndex;
-      renderPlaybackMarkers();
+      if (state.playback.performanceMode) {
+        advanceIncrementalPlayback(previousIndex, state.playIndex);
+        updateMetrics();
+      } else {
+        renderPlaybackMarkers();
+      }
       if (state.playIndex >= state.trackPoints.length - 1) {
         state.playing = false;
         syncPlayButtons();
@@ -2471,6 +2637,21 @@ function bindEvents() {
       if (state.sampling.mode === "manual") {
         reloadActivePlaybackTrack().catch((error) => showError(error.message));
       }
+    }
+  };
+  $("playback-performance-mode").onchange = () => {
+    state.playback.performanceMode = $("playback-performance-mode").checked;
+    state.playing = false;
+    syncPlayButtons();
+    if (isPlaybackMode()) {
+      state.layers.playbackTrackSource?.clear();
+      state.layers.markerSource?.clear();
+      state.playback.shipRuntime.forEach((runtime) => {
+        runtime.lineAdded = false;
+        runtime.markerAdded = false;
+      });
+      renderPlaybackMarkers();
+      setStatus(state.playback.performanceMode ? "性能模式：增量回放" : "性能模式已关闭：完整重绘回放");
     }
   };
   $("draw-box").onclick = drawBox;

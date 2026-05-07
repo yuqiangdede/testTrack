@@ -690,9 +690,22 @@ label {
   gap: 6px;
 }
 
+.sampling-grid .performance-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  align-self: end;
+  min-height: 38px;
+  color: #1b2a44;
+}
+
 .sampling-grid select,
 .sampling-grid input {
   width: 100%;
+}
+
+.sampling-grid .performance-toggle input {
+  width: auto;
 }
 
 .sampling-hint {
