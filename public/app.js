@@ -2052,6 +2052,9 @@ function resetMultiCandidates({ preserveDrawer = false } = {}) {
 }
 
 function clearMultiBBoxAndCandidates() {
+  pausePlayback();
+  state.trackPoints = [];
+  state.playIndex = 0;
   if (state.layers.drawBoxInteraction) {
     state.map?.removeInteraction(state.layers.drawBoxInteraction);
     state.layers.drawBoxInteraction = null;
@@ -2073,9 +2076,11 @@ function clearMultiBBoxAndCandidates() {
   state.multi.candidateBatchCount = 0;
   state.multi.candidateHasMore = false;
   resetMultiCandidates({ preserveDrawer: true });
+  renderTracks();
   renderCandidateDrawer();
   updateMetrics();
-  setStatus("已清空矩形框和候选船舶");
+  syncPlayButtons();
+  setStatus("已清空多船轨迹、矩形框和候选船舶");
 }
 
 function candidatePageItems(page = state.multi.candidateCurrentPage) {
