@@ -1,6 +1,7 @@
 .env
 *.local
 .omx/
+.idea/
 
 target/
 .mvn/wrapper/maven-wrapper.jar

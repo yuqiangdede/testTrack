@@ -132,6 +132,12 @@ const statsRequestCache = new Map();
 const PLAYBACK_SPEED_OPTIONS = [1, 2, 4, 8, 16, 64, 128];
 const TRACK_LINE_OPACITY = 0.24;
 const PLAYBACK_LINE_OPACITY = 0.96;
+const AIS_SHIP_FILL = "rgba(34, 197, 94, 0.75)";
+const AIS_SHIP_STROKE = "#111827";
+const AIS_SHIP_STROKE_WIDTH = 0.8;
+const AIS_SHIP_ICON_WIDTH = 15;
+const AIS_SHIP_ICON_HEIGHT = 7;
+const AIS_SHIP_ICON_CACHE = new Map();
 
 const $ = (id) => document.getElementById(id);
 
@@ -780,6 +786,22 @@ function scheduleRealtimeRender(delay = 120) {
   }, delay);
 }
 
+function cancelRealtimePanFrame() {
+  if (state.layers.realtimePanFrame) {
+    cancelAnimationFrame(state.layers.realtimePanFrame);
+    state.layers.realtimePanFrame = null;
+  }
+}
+
+function renderRealtimeNow() {
+  if (state.layers.realtimeRenderTimer) {
+    clearTimeout(state.layers.realtimeRenderTimer);
+    state.layers.realtimeRenderTimer = null;
+  }
+  cancelRealtimePanFrame();
+  if (state.mode === "realtime" && state.latest.length) renderRealtime();
+}
+
 function syncRealtimeCanvasDuringMove() {
   if (state.mode !== "realtime" || !state.map || !state.layers.realtimeCanvas) return;
   if (!state.layers.realtimeRenderAnchor || !state.layers.realtimeRenderAnchorPixel) return;
@@ -1224,10 +1246,7 @@ function clearRealtimeCanvas() {
     canvas.style.transform = "";
     canvas.classList.toggle("hidden", state.mode !== "realtime");
   }
-  if (state.layers.realtimePanFrame) {
-    cancelAnimationFrame(state.layers.realtimePanFrame);
-    state.layers.realtimePanFrame = null;
-  }
+  cancelRealtimePanFrame();
   state.layers.realtimeRenderAnchor = null;
   state.layers.realtimeRenderAnchorPixel = null;
   state.layers.realtimeRenderResolution = null;
@@ -1238,7 +1257,7 @@ function clearRealtimeCanvas() {
 
 function canvasShipColor(item) {
   if (Number(item.isAis) === 0) return "#22c55e";
-  return Number(item.speed) > 8 ? "#2563eb" : "#168a52";
+  return AIS_SHIP_FILL;
 }
 
 function drawRadarCircle(ctx, x, y, color) {
@@ -1263,52 +1282,72 @@ function drawRadarCircle(ctx, x, y, color) {
   ctx.restore();
 }
 
+function drawAisShipShape(ctx, scale = 1) {
+  const halfWidth = (AIS_SHIP_ICON_WIDTH * scale) / 2;
+  const halfHeight = (AIS_SHIP_ICON_HEIGHT * scale) / 2;
+  ctx.beginPath();
+  ctx.moveTo(-halfWidth, -halfHeight);
+  ctx.lineTo(halfWidth, 0);
+  ctx.lineTo(-halfWidth, halfHeight);
+  ctx.lineTo(-halfWidth * 0.82, 0);
+  ctx.closePath();
+}
+
 function drawShipTriangle(ctx, x, y, heading, color) {
-  const size = 14;
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(((Number(heading) || 0) * Math.PI) / 180);
 
-  const drawHull = (scale) => {
-    ctx.beginPath();
-    ctx.moveTo(0, -size * scale);
-    ctx.lineTo(size * 0.56 * scale, size * 0.92 * scale);
-    ctx.lineTo(0, size * 0.58 * scale);
-    ctx.lineTo(-size * 0.56 * scale, size * 0.92 * scale);
-    ctx.closePath();
-  };
-
   ctx.shadowColor = "rgba(15, 23, 42, 0.22)";
-  ctx.shadowBlur = 5;
+  ctx.shadowBlur = 4;
   ctx.shadowOffsetY = 2;
-  drawHull(1.12);
+  drawAisShipShape(ctx, 1.12);
   ctx.fillStyle = "rgba(255,255,255,0.96)";
   ctx.fill();
 
   ctx.shadowColor = "transparent";
-  drawHull(1);
+  drawAisShipShape(ctx, 1);
   ctx.fillStyle = color;
   ctx.fill();
-  ctx.strokeStyle = "rgba(15,23,42,0.5)";
-  ctx.lineWidth = 0.9;
-  ctx.stroke();
-
-  ctx.beginPath();
-  ctx.moveTo(0, -size * 0.62);
-  ctx.lineTo(0, size * 0.38);
-  ctx.strokeStyle = "rgba(255,255,255,0.78)";
-  ctx.lineWidth = 1.1;
-  ctx.lineCap = "round";
+  ctx.strokeStyle = AIS_SHIP_STROKE;
+  ctx.lineWidth = AIS_SHIP_STROKE_WIDTH;
   ctx.stroke();
   ctx.restore();
 }
 
-function shipMarkerStyle(color) {
+function aisShipIconCanvas(color = AIS_SHIP_FILL) {
+  const key = color;
+  if (AIS_SHIP_ICON_CACHE.has(key)) return AIS_SHIP_ICON_CACHE.get(key);
+  const ratio = window.devicePixelRatio || 1;
+  const padding = 4;
+  const width = AIS_SHIP_ICON_WIDTH + padding * 2;
+  const height = AIS_SHIP_ICON_HEIGHT + padding * 2;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(width * ratio);
+  canvas.height = Math.round(height * ratio);
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(ratio, ratio);
+  ctx.translate(width / 2, height / 2);
+  drawAisShipShape(ctx, 1);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = AIS_SHIP_STROKE;
+  ctx.lineWidth = AIS_SHIP_STROKE_WIDTH;
+  ctx.stroke();
+  AIS_SHIP_ICON_CACHE.set(key, canvas);
+  return canvas;
+}
+
+function shipMarkerStyle(point) {
   return new ol.style.Style({
-    image: new ol.style.Circle({
-      radius: 4.2,
-      fill: new ol.style.Fill({ color }),
-      stroke: new ol.style.Stroke({ color: "rgba(255,255,255,0.96)", width: 1.5 })
+    image: new ol.style.Icon({
+      img: aisShipIconCanvas(AIS_SHIP_FILL),
+      imgSize: [AIS_SHIP_ICON_WIDTH + 8, AIS_SHIP_ICON_HEIGHT + 8],
+      rotation: ((Number(point?.heading) || 0) * Math.PI) / 180,
+      rotateWithView: true,
+      anchor: [0.5, 0.5]
     })
   });
 }
@@ -1337,6 +1376,7 @@ function renderRealtimeCanvas(indices) {
   if (!layer) return false;
   const { ctx, width, height } = layer;
   if (state.layers.realtimeFrame) cancelAnimationFrame(state.layers.realtimeFrame);
+  cancelRealtimePanFrame();
   layer.canvas.style.transform = "";
   state.layers.realtimeRenderAnchor = state.map.getView().getCenter();
   state.layers.realtimeRenderAnchorPixel = state.map.getPixelFromCoordinate(state.layers.realtimeRenderAnchor);
@@ -1697,15 +1737,14 @@ function renderPlaybackMarkers() {
   state.layers.markerSource?.clear();
   state.layers.markers = [];
   const visible = state.trackPoints.slice(0, Math.max(1, state.playIndex + 1));
-  const palette = ["#2563eb", "#16a34a", "#dc2626", "#d97706", "#7c3aed", "#0891b2", "#be123c"];
   const grouped = Array.from(groupByShip(visible).entries());
-  grouped.forEach(([ship, points], index) => {
+  grouped.forEach(([, points]) => {
     const point = points[points.length - 1];
     const marker = new ol.Feature({
       geometry: new ol.geom.Point(toMapCoordinate(point)),
       point
     });
-    marker.setStyle(shipMarkerStyle(palette[index % palette.length]));
+    marker.setStyle(shipMarkerStyle(point));
     state.layers.markerSource?.addFeature(marker);
     state.layers.markers.push(marker);
   });
@@ -2318,7 +2357,7 @@ function initMap() {
   state.map.on("movestart", syncRealtimeCanvasDuringMove);
   state.map.on("pointerdrag", syncRealtimeCanvasDuringMove);
   state.map.on("moveend", () => {
-    scheduleRealtimeRender();
+    renderRealtimeNow();
     if (state.mode === "analysis") scheduleRealtimeSummary();
   });
   state.map.getView().on("change:resolution", () => {
