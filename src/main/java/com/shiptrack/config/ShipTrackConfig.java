@@ -19,6 +19,8 @@ public class ShipTrackConfig {
   public static class Tables {
     public String track = "tb_ais_event_simple_info";
     public String bucketIndex = "tb_ship_bucket_index";
+    public String simplifiedTrack = "tb_ship_track_simplified";
+    public String simplifyOffset = "tb_ship_simplify_offset";
   }
 
   public static class Columns {
@@ -60,6 +62,15 @@ public class ShipTrackConfig {
     public int globalSegmentHours = 1;
     public int logMemorySeconds = 0;
   }
+
+  public static class Simplify {
+    public boolean enabled = true;
+    public int shipBatchSize = 50;
+    public int rowsPerShipBatch = 20000;
+    public List<Double> levelTolerances = List.of(0.0, 0.002, 0.006, 0.015);
+  }
+
+  public Simplify simplify = new Simplify();
 
   public static class MapConfig {
     public String coordinateSystem = "wgs84";

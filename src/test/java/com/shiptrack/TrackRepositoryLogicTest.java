@@ -48,6 +48,15 @@ class TrackRepositoryLogicTest {
   }
 
   @Test
+  void mapsZoomToSimplifyLevel() {
+    TrackRepository repository = repository();
+    assertThat(repository.simplifyLevelForZoom(6)).isEqualTo(3);
+    assertThat(repository.simplifyLevelForZoom(8)).isEqualTo(2);
+    assertThat(repository.simplifyLevelForZoom(11)).isEqualTo(1);
+    assertThat(repository.simplifyLevelForZoom(14)).isEqualTo(0);
+  }
+
+  @Test
   void returnsDatabaseStats() {
     ClickHouseHttpClient clickHouse = mock(ClickHouseHttpClient.class);
     when(clickHouse.queryOne(org.mockito.ArgumentMatchers.anyString())).thenReturn(Map.of("trackPoints", 123L, "ships", 45L));
@@ -97,7 +106,7 @@ class TrackRepositoryLogicTest {
   }
 
   @Test
-  void returnsSingleTrackRowsWithDedicatedQuery() {
+  void returnsSingleTrackRowsFromSimplifiedTableFirst() {
     ClickHouseHttpClient clickHouse = mock(ClickHouseHttpClient.class);
     when(clickHouse.query(anyString(), anyMap()))
         .thenReturn(List.of(Map.of("shipId", "A1", "time", "2026-04-17 00:00:00")));
@@ -110,8 +119,9 @@ class TrackRepositoryLogicTest {
     ArgumentCaptor<Map<String, Object>> paramsCaptor = ArgumentCaptor.forClass(Map.class);
     verify(clickHouse).query(sqlCaptor.capture(), paramsCaptor.capture());
     assertThat(sqlCaptor.getValue()).contains("PREWHERE");
+    assertThat(sqlCaptor.getValue()).contains("FROM `tb_ship_track_simplified`");
     assertThat(sqlCaptor.getValue()).doesNotContain("LIMIT");
-    assertThat(paramsCaptor.getValue()).containsEntry("shipId", "A1").containsKey("bucketSeconds").doesNotContainKey("limit");
+    assertThat(paramsCaptor.getValue()).containsEntry("shipId", "A1").containsEntry("level", 2).doesNotContainKeys("bucketSeconds", "limit");
   }
 
   @Test
@@ -143,15 +153,17 @@ class TrackRepositoryLogicTest {
     assertThat(repository.singleTrackRows("A1", "2026-04-17T00:00:00.000Z", "2026-04-17T01:00:00.000Z", 8, null, "manual", 45))
         .hasSize(1);
 
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
     ArgumentCaptor<Map<String, Object>> paramsCaptor = ArgumentCaptor.forClass(Map.class);
-    verify(clickHouse).query(anyString(), paramsCaptor.capture());
-    assertThat(paramsCaptor.getValue()).containsEntry("bucketSeconds", 45).doesNotContainKey("limit");
+    verify(clickHouse).query(sqlCaptor.capture(), paramsCaptor.capture());
+    assertThat(sqlCaptor.getValue()).contains("FROM `tb_ship_track_simplified`");
+    assertThat(paramsCaptor.getValue()).containsEntry("level", 2).doesNotContainKeys("bucketSeconds", "limit");
   }
 
   @Test
   void returnsMultiTrackRowsWithoutBoundingBoxWhenNoBBoxIsProvided() {
     ClickHouseHttpClient clickHouse = mock(ClickHouseHttpClient.class);
-    when(clickHouse.query(anyString(), anyMap())).thenReturn(List.of());
+    when(clickHouse.query(anyString(), anyMap())).thenReturn(List.of(Map.of("shipId", "A1", "time", "2026-04-17 00:00:00")));
     TrackRepository repository = repository(clickHouse);
 
     repository.trackRows(
@@ -167,9 +179,36 @@ class TrackRepositoryLogicTest {
     ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
     ArgumentCaptor<Map<String, Object>> paramsCaptor = ArgumentCaptor.forClass(Map.class);
     verify(clickHouse).query(sqlCaptor.capture(), paramsCaptor.capture());
+    assertThat(sqlCaptor.getValue()).contains("FROM `tb_ship_track_simplified`");
     assertThat(sqlCaptor.getValue()).doesNotContain("{west").doesNotContain("{east").doesNotContain("{south").doesNotContain("{north");
     assertThat(sqlCaptor.getValue()).doesNotContain("LIMIT");
-    assertThat(paramsCaptor.getValue()).containsKey("bucketSeconds").doesNotContainKeys("west", "east", "south", "north", "limit");
+    assertThat(paramsCaptor.getValue()).containsEntry("level", 2).doesNotContainKeys("west", "east", "south", "north", "bucketSeconds", "limit");
+  }
+
+  @Test
+  void fallsBackToBucketedMultiRowsWhenSimplifiedTableIsEmpty() {
+    ClickHouseHttpClient clickHouse = mock(ClickHouseHttpClient.class);
+    when(clickHouse.query(anyString(), anyMap()))
+        .thenReturn(List.of(), List.of(Map.of("shipId", "A1", "time", "2026-04-17 00:00:00")));
+    TrackRepository repository = repository(clickHouse);
+
+    assertThat(repository.trackRows(
+        List.of("A1", "B2"),
+        "2026-04-17T00:00:00.000Z",
+        "2026-04-17T01:00:00.000Z",
+        8,
+        null,
+        "multi",
+        "auto",
+        null)).hasSize(1);
+
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    ArgumentCaptor<Map<String, Object>> paramsCaptor = ArgumentCaptor.forClass(Map.class);
+    org.mockito.Mockito.verify(clickHouse, org.mockito.Mockito.times(2)).query(sqlCaptor.capture(), paramsCaptor.capture());
+    assertThat(sqlCaptor.getAllValues().get(0)).contains("FROM `tb_ship_track_simplified`");
+    assertThat(sqlCaptor.getAllValues().get(1)).contains("FROM `tb_ais_event_simple_info`").contains("GROUP BY `ship_serial_no`, bucket");
+    assertThat(paramsCaptor.getAllValues().get(0)).containsEntry("level", 2);
+    assertThat(paramsCaptor.getAllValues().get(1)).containsKey("bucketSeconds").doesNotContainKey("limit");
   }
 
   @Test
@@ -254,9 +293,9 @@ class TrackRepositoryLogicTest {
   }
 
   @Test
-  void returnsGlobalSegmentWithAutoSamplingBucketGrouping() {
+  void returnsGlobalSegmentFromSimplifiedTableFirst() {
     ClickHouseHttpClient clickHouse = mock(ClickHouseHttpClient.class);
-    when(clickHouse.query(anyString(), anyMap())).thenReturn(List.of());
+    when(clickHouse.query(anyString(), anyMap())).thenReturn(List.of(Map.of("shipId", "A1", "time", "2026-04-17 00:00:00")));
     TrackRepository repository = repository(clickHouse);
 
     repository.globalSegment("2026-04-17T00:00:00.000Z", "2026-04-17T01:00:00.000Z", 8, "auto", null);
@@ -264,14 +303,15 @@ class TrackRepositoryLogicTest {
     ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
     ArgumentCaptor<Map<String, Object>> paramsCaptor = ArgumentCaptor.forClass(Map.class);
     verify(clickHouse).query(sqlCaptor.capture(), paramsCaptor.capture());
-    assertThat(sqlCaptor.getValue()).contains("FROM `tb_ais_event_simple_info`");
+    assertThat(sqlCaptor.getValue()).contains("FROM `tb_ship_track_simplified`");
     assertThat(sqlCaptor.getValue()).doesNotContain("tb_ship_bucket_index");
     assertThat(sqlCaptor.getValue()).doesNotContain("LIMIT");
-    assertThat(sqlCaptor.getValue()).contains("GROUP BY `ship_serial_no`, bucket");
+    assertThat(sqlCaptor.getValue()).doesNotContain("GROUP BY");
     assertThat(sqlCaptor.getValue()).contains("ORDER BY time ASC, shipId ASC");
     assertThat(paramsCaptor.getValue()).containsEntry("start", "2026-04-17T00:00:00.000Z")
         .containsEntry("end", "2026-04-17T01:00:00.000Z")
-        .containsKey("bucketSeconds");
+        .containsEntry("level", 2)
+        .doesNotContainKey("bucketSeconds");
     assertThat(sqlCaptor.getValue()).doesNotContain("{west").doesNotContain("{east").doesNotContain("{south").doesNotContain("{north");
     assertThat(sqlCaptor.getValue()).doesNotContain("bbox");
   }

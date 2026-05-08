@@ -32,7 +32,8 @@ flowchart TD
 | `ApiController` | 接收 HTTP 请求，解析 query/body，校验时间窗口、bbox、zoom，调用服务或仓库并组织响应。 |
 | `RealtimeService` | 推算实时窗口和全域窗口，维护实时最新船位缓存，读取数据库统计缓存。 |
 | `TrackRepository` | 根据业务场景生成 ClickHouse SQL，处理抽稀、统计聚合、候选船查询。 |
-| `ClickHouseHttpClient` | 将 SQL 和参数通过 ClickHouse HTTP 接口发送，追加 `FORMAT JSONEachRow`，解析返回行。 |
+| `TrackSimplificationService` | 每 5 分钟按船增量读取原始轨迹，执行 SED-RDP，写入多级抽稀表和 offset 表。 |
+| `ClickHouseHttpClient` | 将 SQL 和参数通过 ClickHouse HTTP 接口发送，追加 `FORMAT JSONEachRow`，解析返回行；批量写入时使用 `INSERT ... FORMAT JSONEachRow`。 |
 | `ApiExceptionHandler` | 捕获异常并返回统一 `{ "error": "..." }` JSON。 |
 
 通用数据库查询流程：
@@ -48,6 +49,36 @@ flowchart TD
   F -->|非 2xx| H["抛出 ClickHouseException"]
   G --> I["返回 List<Map> 或单行 Map"]
   H --> J["ApiExceptionHandler 转换错误响应"]
+```
+
+抽稀表生成流程：
+
+```mermaid
+flowchart TD
+  A["TrackSimplificationService 定时任务或回填 runner"] --> B["nextShipIds 查询原始表最大时间和 offset"]
+  B --> C{"是否存在待处理船舶?"}
+  C -->|否| D["结束本轮"]
+  C -->|是| E["按船读取 offset 之后的原始轨迹"]
+  E --> F["SED-RDP 生成 L0/L1/L2/L3"]
+  F --> G["ClickHouseHttpClient.insertJsonEachRow"]
+  G --> H["写入 tb_ship_track_simplified"]
+  H --> I["写入 tb_ship_simplify_offset"]
+  I --> B
+```
+
+抽稀查询通用流程：
+
+```mermaid
+flowchart TD
+  A["single/multi/global 轨迹查询"] --> B["normalize samplingMode"]
+  B --> C{"samplingMode == raw?"}
+  C -->|是| D["查询 tb_ais_event_simple_info 原始轨迹"]
+  C -->|否| E["按 zoom 映射 simplify_level"]
+  E --> F["优先查询 tb_ship_track_simplified"]
+  F --> G{"抽稀表有数据?"}
+  G -->|是| H["返回抽稀表轨迹点"]
+  G -->|否| I["fallback 到原有 bucket GROUP BY 查询"]
+  I --> J["返回 bucket 抽稀轨迹点"]
 ```
 
 ## 2. `GET /api/config/map`
@@ -406,7 +437,7 @@ flowchart TD
 
 ## 11. `GET /api/tracks/single`
 
-后台职责：查询单船轨迹，支持原始点和抽稀点返回。
+后台职责：查询单船轨迹，支持原始点和抽稀点返回。`raw` 查询原始表；`auto/manual` 优先查询抽稀表，空结果时回退到原有 bucket 查询。
 
 ```mermaid
 flowchart TD
@@ -420,12 +451,16 @@ flowchart TD
   H --> I["resolveSamplingPlan"]
   I --> J{"samplingMode == raw?"}
   J -->|是| K["生成原始点 SQL，PREWHERE shipId"]
-  J -->|否| L["计算或使用 bucketSeconds"]
-  L --> M["生成按 bucket GROUP BY 的抽稀 SQL"]
-  K --> N["ClickHouseHttpClient.query"]
-  M --> N
-  N --> O["返回 items"]
-  D --> P["ApiExceptionHandler 返回 error JSON"]
+  J -->|否| L["simplifyLevelForZoom"]
+  L --> M["查询 tb_ship_track_simplified"]
+  M --> N{"抽稀表有数据?"}
+  N -->|是| O["返回抽稀点"]
+  N -->|否| P["计算或使用 bucketSeconds"]
+  P --> Q["生成按 bucket GROUP BY 的 fallback SQL"]
+  K --> R["ClickHouseHttpClient.query"]
+  Q --> R
+  R --> O
+  D --> S["ApiExceptionHandler 返回 error JSON"]
 ```
 
 关键处理步骤：
@@ -433,7 +468,7 @@ flowchart TD
 1. `shipId` 为空直接抛出异常。
 2. 时间窗口必须合法，`zoom` 必须在 3 到 18。
 3. `samplingMode` 非法时归一化为 `auto`。
-4. `raw` 模式返回原始轨迹点；`auto/manual` 模式按时间桶聚合返回抽稀点。
+4. `raw` 模式返回原始轨迹点；`auto/manual` 模式先按 zoom 查询抽稀表，抽稀表无数据时按时间桶聚合返回 fallback 抽稀点。
 
 主要参与类/方法：
 
@@ -441,13 +476,14 @@ flowchart TD
 | --- | --- |
 | `ApiController` | `single(...)`, `normalizeSamplingMode(...)`, `parseBucketSeconds(...)` |
 | `RealtimeService` | `validateTimeWindow(...)`, `validateZoom(...)` |
-| `TrackRepository` | `singleTrackRows(...)`, `resolveSamplingPlan(...)`, `calculateBucketSizeSeconds(...)` |
+| `TrackRepository` | `singleTrackRows(...)`, `simplifyLevelForZoom(...)`, `resolveSamplingPlan(...)`, `calculateBucketSizeSeconds(...)` |
 
 性能注意点或特殊逻辑：
 
 - 默认使用 `auto` 抽稀，目标是控制单船返回点数。
 - `raw` 模式可能返回大量点，应只用于需要原始明细的场景。
 - 单船 SQL 使用 `PREWHERE shipId`。
+- 抽稀表未建或查询失败时会回退到原有 bucket 查询，避免接口不可用。
 
 ## 12. `GET /api/tracks/candidates`
 
@@ -495,7 +531,7 @@ flowchart TD
 
 ## 13. `POST /api/tracks/multi`
 
-后台职责：查询多艘船轨迹，支持原始点和抽稀点返回。
+后台职责：查询多艘船轨迹，支持原始点和抽稀点返回。`raw` 查询原始表；`auto/manual` 优先查询抽稀表，空结果时回退到原有 bucket 查询。
 
 ```mermaid
 flowchart TD
@@ -511,19 +547,23 @@ flowchart TD
   J --> K["resolveSamplingPlan"]
   K --> L{"samplingMode == raw?"}
   L -->|是| M["生成原始多船 SQL"]
-  L -->|否| N["计算或使用 bucketSeconds"]
-  N --> O["生成 shipId + bucket GROUP BY 抽稀 SQL"]
-  M --> P["ClickHouseHttpClient.query"]
-  O --> P
-  P --> Q["返回 items"]
-  F --> R["ApiExceptionHandler 返回 error JSON"]
+  L -->|否| N["simplifyLevelForZoom"]
+  N --> O["查询 tb_ship_track_simplified"]
+  O --> P{"抽稀表有数据?"}
+  P -->|是| Q["返回抽稀点"]
+  P -->|否| R["计算或使用 bucketSeconds"]
+  R --> S["生成 shipId + bucket GROUP BY fallback SQL"]
+  M --> T["ClickHouseHttpClient.query"]
+  S --> T
+  T --> Q
+  F --> U["ApiExceptionHandler 返回 error JSON"]
 ```
 
 关键处理步骤：
 
 1. `shipIds` 最多保留 `config.query.maxMultiShips` 个。
 2. `zoom` 为空时使用 `config.map.defaultZoom`；当前该接口未调用 `validateZoom`。
-3. `TrackRepository.trackRows` 根据抽稀计划生成原始 SQL 或桶聚合 SQL。
+3. `TrackRepository.trackRows` 根据抽稀计划生成原始 SQL、抽稀表 SQL 或 fallback 桶聚合 SQL。
 4. 请求体类中存在 `bbox` 字段，但当前控制器传给仓库的是 `null`，因此该接口实际不按 bbox 过滤。
 
 主要参与类/方法：
@@ -539,10 +579,11 @@ flowchart TD
 - 多船查询是重接口，默认应使用 `auto` 抽稀。
 - 船舶数量受 `maxMultiShips` 限制，避免超大查询影响加载速度。
 - 建议先用 `/api/tracks/candidates` 筛选船舶，再调用该接口。
+- 前端使用返回点作为播放事件源，但地图只绘制当前播放时刻向前 30 分钟的轨迹窗口，不再预画整段轨迹。
 
 ## 14. `GET /api/tracks/global-segment`
 
-后台职责：查询全域回放时间片段内的轨迹数据，支持原始点和抽稀点返回。
+后台职责：查询全域回放时间片段内的轨迹数据，支持原始点和抽稀点返回。`raw` 查询原始表；`auto/manual` 优先查询抽稀表，空结果时回退到原有 bucket 查询。
 
 ```mermaid
 flowchart TD
@@ -559,17 +600,21 @@ flowchart TD
   J --> K["resolveSamplingPlan"]
   K --> L{"samplingMode == raw?"}
   L -->|是| M["生成全域原始点 SQL"]
-  L -->|否| N["生成 shipId + bucket GROUP BY 抽稀 SQL"]
-  M --> O["ClickHouseHttpClient.query"]
-  N --> O
-  O --> P["返回全域轨迹 items"]
+  L -->|否| N["simplifyLevelForZoom"]
+  N --> O["查询 tb_ship_track_simplified"]
+  O --> P{"抽稀表有数据?"}
+  P -->|是| Q["返回全域抽稀点"]
+  P -->|否| R["生成 shipId + bucket GROUP BY fallback SQL"]
+  M --> S["ClickHouseHttpClient.query"]
+  R --> S
+  S --> Q
 ```
 
 关键处理步骤：
 
 1. `timePoint` 为空时通过 `watermark()` 取数据库最大时间。
 2. `hours` 为空时使用配置 `query.globalSegmentHours`。
-3. `globalSegment` 使用 `query.maxGlobalSegmentPoints` 参与自动抽稀粒度计算。
+3. `globalSegment` 在 `auto/manual` 下先按 zoom 查询抽稀表，抽稀表无数据时使用 `query.maxGlobalSegmentPoints` 参与 fallback bucket 粒度计算。
 4. 返回多艘船的轨迹点，按时间和船舶编号排序。
 
 主要参与类/方法：
@@ -584,6 +629,7 @@ flowchart TD
 
 - 全域查询覆盖范围最大，应优先使用 `auto` 抽稀。
 - `raw` 模式可能返回巨大数据量，容易影响船只加载和前端渲染。
+- 前端全域回放只显示每艘船当前播放时刻的位置 marker，不绘制轨迹线。
 
 ## 15. `GET /ws/realtime`
 
@@ -652,4 +698,3 @@ flowchart TD
 
 - 异常处理本身不做重试。
 - ClickHouse 连接失败会在日志中记录 endpoint、timeout 和 max execution time。
-

@@ -80,6 +80,21 @@ public class ClickHouseHttpClient {
     post(sql, Map.of(), false, timeoutSeconds, maxExecutionTime);
   }
 
+  public void insertJsonEachRow(String sql, List<Map<String, Object>> rows, int timeoutSeconds, int maxExecutionTime) {
+    if (rows == null || rows.isEmpty()) {
+      return;
+    }
+    StringBuilder body = new StringBuilder(sql).append("\nFORMAT JSONEachRow\n");
+    for (Map<String, Object> row : rows) {
+      try {
+        body.append(objectMapper.writeValueAsString(row)).append('\n');
+      } catch (IOException error) {
+        throw new ClickHouseException("Failed to serialize ClickHouse insert row", error);
+      }
+    }
+    post(body.toString(), Map.of(), false, timeoutSeconds, maxExecutionTime);
+  }
+
   private String post(String body, Map<String, Object> params, boolean wrapConnectionError, int timeoutSeconds, int maxExecutionTime) {
     URI uri = URI.create(parsedJdbc.url + "?" + queryString(params, maxExecutionTime));
     String auth = Base64.getEncoder().encodeToString((config.clickhouse.username + ":" + config.clickhouse.password).getBytes(StandardCharsets.UTF_8));

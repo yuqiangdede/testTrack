@@ -3,6 +3,7 @@ package com.shiptrack.track;
 import static com.shiptrack.clickhouse.SqlUtil.ident;
 import static com.shiptrack.clickhouse.SqlUtil.sqlDateParam;
 
+import com.shiptrack.clickhouse.ClickHouseException;
 import com.shiptrack.clickhouse.ClickHouseHttpClient;
 import com.shiptrack.config.ShipConfigService;
 import com.shiptrack.config.ShipTrackConfig;
@@ -408,6 +409,13 @@ public class TrackRepository {
     return Math.max(1, bucketSeconds == null ? DEFAULT_MANUAL_BUCKET_SECONDS : bucketSeconds);
   }
 
+  public int simplifyLevelForZoom(int zoom) {
+    if (zoom <= 7) return 3;
+    if (zoom <= 10) return 2;
+    if (zoom <= 13) return 1;
+    return 0;
+  }
+
   public List<Map<String, Object>> trackRows(List<String> shipIds, String start, String end, int zoom, BBox bbox,
       String mode, String samplingMode, Integer bucketSeconds) {
     if (shipIds == null || shipIds.isEmpty()) {
@@ -454,6 +462,10 @@ public class TrackRepository {
       Map<String, Object> params = params("shipIds", shipIds, "start", start, "end", end);
       putBbox(params, bbox);
       return clickHouse.query(query, params);
+    }
+    List<Map<String, Object>> simplified = safeSimplifiedTrackRows(shipIds, start, end, zoom, bbox);
+    if (!simplified.isEmpty()) {
+      return simplified;
     }
     String query = """
         SELECT
@@ -536,6 +548,10 @@ public class TrackRepository {
       putBbox(params, bbox);
       return clickHouse.query(query, params);
     }
+    List<Map<String, Object>> simplified = safeSimplifiedSingleTrackRows(shipId, start, end, zoom, bbox);
+    if (!simplified.isEmpty()) {
+      return simplified;
+    }
     String query = """
         SELECT
           {shipId: String} AS shipId,
@@ -601,6 +617,10 @@ public class TrackRepository {
           ident(c.eventTime), sqlDateParam("end"));
       return clickHouse.query(query, params("start", start, "end", end));
     }
+    List<Map<String, Object>> simplified = safeSimplifiedGlobalSegment(start, end, zoom);
+    if (!simplified.isEmpty()) {
+      return simplified;
+    }
     String query = """
         SELECT
           %s AS shipId,
@@ -630,6 +650,142 @@ public class TrackRepository {
         ident(c.eventTime), sqlDateParam("end"),
         ident(c.shipId));
     return clickHouse.query(query, params("start", start, "end", end, "bucketSeconds", sampling.bucketSeconds()));
+  }
+
+  private List<Map<String, Object>> safeSimplifiedTrackRows(List<String> shipIds, String start, String end, int zoom, BBox bbox) {
+    try {
+      return simplifiedTrackRows(shipIds, start, end, zoom, bbox);
+    } catch (ClickHouseException ignored) {
+      return List.of();
+    }
+  }
+
+  private List<Map<String, Object>> safeSimplifiedSingleTrackRows(String shipId, String start, String end, int zoom, BBox bbox) {
+    try {
+      return simplifiedSingleTrackRows(shipId, start, end, zoom, bbox);
+    } catch (ClickHouseException ignored) {
+      return List.of();
+    }
+  }
+
+  private List<Map<String, Object>> safeSimplifiedGlobalSegment(String start, String end, int zoom) {
+    try {
+      return simplifiedGlobalSegment(start, end, zoom);
+    } catch (ClickHouseException ignored) {
+      return List.of();
+    }
+  }
+
+  private List<Map<String, Object>> simplifiedTrackRows(List<String> shipIds, String start, String end, int zoom, BBox bbox) {
+    ShipTrackConfig.Columns c = config.columns;
+    String bboxFilter = bbox == null ? "" : """
+        AND %s BETWEEN {west: Float64} AND {east: Float64}
+        AND %s BETWEEN {south: Float64} AND {north: Float64}
+        """.formatted(ident(c.longitude), ident(c.latitude));
+    String query = """
+        SELECT
+          %s AS shipId,
+          %s AS shipName,
+          %s AS lng,
+          %s AS lat,
+          %s AS speed,
+          %s AS heading,
+          isAis AS isAis,
+          toString(%s) AS time
+        FROM %s
+        WHERE simplify_level = {level: UInt8}
+          AND %s IN {shipIds: Array(String)}
+          AND %s >= %s
+          AND %s < %s
+          %s
+        ORDER BY time ASC, shipId ASC
+        """.formatted(
+        ident(c.shipId),
+        ident(c.shipName),
+        ident(c.longitude),
+        ident(c.latitude),
+        ident(c.speed),
+        ident(c.heading),
+        ident(c.eventTime),
+        ident(config.tables.simplifiedTrack),
+        ident(c.shipId),
+        ident(c.eventTime), sqlDateParam("start"),
+        ident(c.eventTime), sqlDateParam("end"),
+        bboxFilter);
+    Map<String, Object> params = params("shipIds", shipIds, "start", start, "end", end, "level", simplifyLevelForZoom(zoom));
+    putBbox(params, bbox);
+    return clickHouse.query(query, params);
+  }
+
+  private List<Map<String, Object>> simplifiedSingleTrackRows(String shipId, String start, String end, int zoom, BBox bbox) {
+    ShipTrackConfig.Columns c = config.columns;
+    String bboxFilter = bbox == null ? "" : """
+        AND %s BETWEEN {west: Float64} AND {east: Float64}
+        AND %s BETWEEN {south: Float64} AND {north: Float64}
+        """.formatted(ident(c.longitude), ident(c.latitude));
+    String query = """
+        SELECT
+          {shipId: String} AS shipId,
+          %s AS shipName,
+          %s AS lng,
+          %s AS lat,
+          %s AS speed,
+          %s AS heading,
+          isAis AS isAis,
+          toString(%s) AS time
+        FROM %s
+        PREWHERE %s = {shipId: String}
+        WHERE simplify_level = {level: UInt8}
+          AND %s >= %s
+          AND %s < %s
+          %s
+        ORDER BY time ASC
+        """.formatted(
+        ident(c.shipName),
+        ident(c.longitude),
+        ident(c.latitude),
+        ident(c.speed),
+        ident(c.heading),
+        ident(c.eventTime),
+        ident(config.tables.simplifiedTrack),
+        ident(c.shipId),
+        ident(c.eventTime), sqlDateParam("start"),
+        ident(c.eventTime), sqlDateParam("end"),
+        bboxFilter);
+    Map<String, Object> params = params("shipId", shipId, "start", start, "end", end, "level", simplifyLevelForZoom(zoom));
+    putBbox(params, bbox);
+    return clickHouse.query(query, params);
+  }
+
+  private List<Map<String, Object>> simplifiedGlobalSegment(String start, String end, int zoom) {
+    ShipTrackConfig.Columns c = config.columns;
+    String query = """
+        SELECT
+          %s AS shipId,
+          %s AS shipName,
+          %s AS lng,
+          %s AS lat,
+          %s AS speed,
+          %s AS heading,
+          isAis AS isAis,
+          toString(%s) AS time
+        FROM %s
+        WHERE simplify_level = {level: UInt8}
+          AND %s >= %s
+          AND %s < %s
+        ORDER BY time ASC, shipId ASC
+        """.formatted(
+        ident(c.shipId),
+        ident(c.shipName),
+        ident(c.longitude),
+        ident(c.latitude),
+        ident(c.speed),
+        ident(c.heading),
+        ident(c.eventTime),
+        ident(config.tables.simplifiedTrack),
+        ident(c.eventTime), sqlDateParam("start"),
+        ident(c.eventTime), sqlDateParam("end"));
+    return clickHouse.query(query, params("start", start, "end", end, "level", simplifyLevelForZoom(zoom)));
   }
 
   public double densityGridSizeDegrees(int zoom) {
