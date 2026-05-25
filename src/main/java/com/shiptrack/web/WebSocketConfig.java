@@ -9,13 +9,16 @@ import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry
 @EnableWebSocket
 public class WebSocketConfig implements WebSocketConfigurer {
   private final RealtimeWebSocketHandler handler;
+  private final GlobalReplayWebSocketHandler globalReplayHandler;
 
-  public WebSocketConfig(RealtimeWebSocketHandler handler) {
+  public WebSocketConfig(RealtimeWebSocketHandler handler, GlobalReplayWebSocketHandler globalReplayHandler) {
     this.handler = handler;
+    this.globalReplayHandler = globalReplayHandler;
   }
 
   @Override
   public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
     registry.addHandler(handler, "/ws/realtime").setAllowedOrigins("*");
+    registry.addHandler(globalReplayHandler, "/ws/global-replay").setAllowedOrigins("*");
   }
 }

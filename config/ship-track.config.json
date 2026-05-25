@@ -1,23 +1,22 @@
 {
   "clickhouse": {
-    "jdbcUrl": "jdbc:clickhouse://127.0.0.1:8123/default",
+    "jdbcUrl": "jdbc:clickhouse://10.100.1.23:8461/track",
     "username": "default",
-    "password": ""
+    "password": "123456"
   },
   "tables": {
-    "track": "tb_ais_event_simple_info",
+    "track": "tb_ais_track_raw",
     "bucketIndex": "tb_ship_bucket_index",
-    "simplifiedTrack": "tb_ship_track_simplified",
-    "simplifyOffset": "tb_ship_simplify_offset"
+    "simplifiedTrack": "tb_ais_track_thin"
   },
   "columns": {
     "shipId": "ship_serial_no",
-    "shipName": "ship_name",
     "eventTime": "event_time",
     "longitude": "longitude_wgs",
     "latitude": "latitude_wgs",
     "speed": "ground_speed",
-    "heading": "ground_course"
+    "heading": "ground_course",
+    "type": "type"
   },
   "bucketIndexColumns": {
     "shipId": "ship_serial_no",
@@ -25,13 +24,13 @@
     "minLng": "min_lng",
     "maxLng": "max_lng",
     "minLat": "min_lat",
-    "maxLat": "max_lat",
-    "shipName": "ship_name",
-    "isAis": "isAis"
+    "maxLat": "max_lat"
   },
   "query": {
     "latestLookbackHours": 5,
     "realtimeWindowMinutes": 10,
+    "defaultRealtimeAnchor": "2026-05-24 23:59:59",
+    "defaultRealtimeWindowMinutes": 30,
     "clickhouseTimeoutSeconds": 30,
     "logSql": true,
     "latestPageSize": 30000,
@@ -46,7 +45,7 @@
     "globalSegmentHours": 1
   },
   "simplify": {
-    "enabled": true,
+    "enabled": false,
     "shipBatchSize": 50,
     "rowsPerShipBatch": 20000,
     "levelTolerances": [0.0, 0.002, 0.006, 0.015]

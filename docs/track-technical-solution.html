@@ -1,0 +1,1075 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>船舶态势与轨迹回放技术方案</title>
+    <style>
+      :root {
+        --paper: #f6f8fb;
+        --surface: #ffffff;
+        --ink: #13233a;
+        --muted: #53657d;
+        --line: #d8e0eb;
+        --accent: #006a78;
+        --accent-soft: #e2f3f5;
+        --warn: #8b4d00;
+        --warn-soft: #fff1d9;
+        --code: #0d1b2a;
+        --code-ink: #e7eef9;
+        --shadow: 0 16px 42px rgba(19, 35, 58, 0.08);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font: 15px/1.72 "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      .shell {
+        display: grid;
+        grid-template-columns: minmax(220px, 290px) minmax(0, 1fr);
+        min-height: 100vh;
+      }
+
+      nav {
+        position: sticky;
+        top: 0;
+        align-self: start;
+        height: 100vh;
+        overflow: auto;
+        padding: 34px 24px;
+        color: #d9e6f6;
+        background: #10253a;
+      }
+
+      nav strong,
+      nav span {
+        display: block;
+      }
+
+      nav strong {
+        margin-bottom: 6px;
+        font-size: 22px;
+        line-height: 1.35;
+      }
+
+      nav span {
+        margin-bottom: 24px;
+        color: #9fb7cf;
+      }
+
+      nav a {
+        display: block;
+        margin: 4px 0;
+        padding: 7px 10px;
+        border-left: 2px solid transparent;
+        color: #d9e6f6;
+        text-decoration: none;
+      }
+
+      nav a:hover {
+        border-left-color: #56c8d7;
+        background: rgba(255, 255, 255, 0.08);
+      }
+
+      main {
+        min-width: 0;
+        padding: clamp(24px, 4vw, 58px);
+      }
+
+      article {
+        max-width: 1280px;
+        margin: 0 auto;
+      }
+
+      header,
+      section {
+        margin-bottom: 20px;
+        padding: clamp(20px, 3vw, 36px);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+
+      h1,
+      h2,
+      h3,
+      h4 {
+        margin: 0 0 12px;
+        line-height: 1.35;
+        letter-spacing: 0;
+      }
+
+      h1 {
+        max-width: 900px;
+        font-size: clamp(30px, 4vw, 48px);
+      }
+
+      h2 {
+        border-bottom: 1px solid var(--line);
+        padding-bottom: 10px;
+        font-size: 26px;
+      }
+
+      h3 {
+        margin-top: 24px;
+        font-size: 20px;
+      }
+
+      h4 {
+        margin-top: 20px;
+        font-size: 16px;
+      }
+
+      p,
+      ul,
+      ol,
+      table,
+      pre {
+        margin-top: 0;
+      }
+
+      .lede {
+        max-width: 950px;
+        color: var(--muted);
+        font-size: 17px;
+      }
+
+      .chips,
+      .grid {
+        display: grid;
+        gap: 12px;
+      }
+
+      .chips {
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        margin-top: 22px;
+      }
+
+      .chip,
+      .callout {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 14px 16px;
+        background: #f8fbff;
+      }
+
+      .chip strong {
+        display: block;
+        margin-bottom: 4px;
+        color: var(--accent);
+      }
+
+      .grid.two {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .callout.primary {
+        border-color: #b9e1e7;
+        background: var(--accent-soft);
+      }
+
+      .callout.warn {
+        border-color: #f0cf92;
+        background: var(--warn-soft);
+        color: var(--warn);
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+
+      th,
+      td {
+        border-bottom: 1px solid var(--line);
+        padding: 10px 12px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        background: #eef4fb;
+        color: #243b55;
+      }
+
+      tr:last-child td {
+        border-bottom: 0;
+      }
+
+      pre {
+        overflow: auto;
+        border-radius: 8px;
+        padding: 18px;
+        color: var(--code-ink);
+        background: var(--code);
+        font: 13px/1.62 Consolas, "Cascadia Code", "Courier New", monospace;
+      }
+
+      code {
+        font-family: Consolas, "Cascadia Code", "Courier New", monospace;
+      }
+
+      :not(pre) > code {
+        border-radius: 4px;
+        padding: 1px 5px;
+        background: #eaf0f7;
+      }
+
+      .flow {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 10px;
+        margin: 16px 0;
+      }
+
+      .flow div {
+        position: relative;
+        min-height: 78px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 12px;
+        background: #fbfdff;
+      }
+
+      .flow strong {
+        display: block;
+        color: var(--accent);
+      }
+
+      .small {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .sql-note {
+        margin-bottom: 8px;
+        color: var(--muted);
+      }
+
+      @media (max-width: 920px) {
+        .shell,
+        .grid.two {
+          grid-template-columns: 1fr;
+        }
+
+        nav {
+          position: static;
+          height: auto;
+          padding: 22px;
+        }
+
+        nav a {
+          display: inline-block;
+          margin-right: 4px;
+        }
+
+        main {
+          padding: 18px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <nav>
+        <strong>技术方案</strong>
+        <span>船舶态势与轨迹回放</span>
+        <a href="#baseline">1. 方案基线</a>
+        <a href="#architecture">2. 总体架构</a>
+        <a href="#schema">3. 建表与表结构</a>
+        <a href="#query-principles">4. 查询原则</a>
+        <a href="#feature-sql">5. 功能查询 SQL</a>
+        <a href="#optimization">6. 流程优化设计</a>
+        <a href="#frontend">7. 前端页面设计</a>
+        <a href="#risks">8. 约束与后续建议</a>
+      </nav>
+      <main>
+        <article>
+          <header id="baseline">
+            <p class="small">基于当前仓库代码与 <code>db/simplified-tracks.sql</code> 整理</p>
+            <h1>船舶态势与轨迹回放技术方案</h1>
+            <p class="lede">
+              本方案覆盖原始轨迹、固定抽稀轨迹、船舶时空索引、实时最新船位缓存、单船/多船/全域回放、
+              以及态势密度和统计接口。唯一优先级是船只加载速度：首屏只走必要链路，默认轨迹查询走固定抽稀表，
+              统计、候选、分析、日志和调试能力都不能抢占船只加载链路。
+            </p>
+            <div class="chips">
+              <div class="chip">
+                <strong>存储</strong>
+                ClickHouse 原始表、固定抽稀表、时空索引表
+              </div>
+              <div class="chip">
+                <strong>服务</strong>
+                Spring Boot + ClickHouse HTTP 查询
+              </div>
+              <div class="chip">
+                <strong>缓存</strong>
+                RealtimeService 维护最新船位和数据库统计
+              </div>
+              <div class="chip">
+                <strong>主链路</strong>
+                配置加载后立即请求实时船位
+              </div>
+            </div>
+          </header>
+
+          <section>
+            <h2>文档结论</h2>
+            <div class="grid two">
+              <div class="callout primary">
+                <h3>当前技术选型</h3>
+                <ul>
+                  <li><code>tb_ais_track_raw</code> 保存原始轨迹，TTL 一年。</li>
+                  <li><code>tb_ais_track_thin</code> 保存 60/300/1800 秒固定抽稀点。</li>
+                  <li><code>tb_ship_bucket_index</code> 为多船框选提供候选船索引。</li>
+                  <li>单船轨迹默认读抽稀表；只有单船 <code>samplingMode=raw</code> 会读原始表。</li>
+                </ul>
+              </div>
+              <div class="callout warn">
+                <h3>性能红线</h3>
+                <ul>
+                  <li>首屏先加载配置和实时船位，不把统计和辅助分析串到首屏前面。</li>
+                  <li>候选船查询只走索引表，不直接在原始表按 bbox 聚合。</li>
+                  <li>全域回放默认只给位置帧，不绘制整段全域轨迹线。</li>
+                  <li>新增日志、监控、报表都必须证明不拖慢船只加载。</li>
+                </ul>
+              </div>
+            </div>
+          </section>
+
+          <section id="architecture">
+            <h2>总体架构</h2>
+            <h3>数据流</h3>
+            <div class="flow">
+              <div>
+                <strong>1. 原始写入</strong>
+                AIS、雷达、北斗及融合源写入 <code>tb_ais_track_raw</code>
+              </div>
+              <div>
+                <strong>2. 抽稀与索引</strong>
+                写入链路维护 <code>tb_ais_track_thin</code> 和 <code>tb_ship_bucket_index</code>
+              </div>
+              <div>
+                <strong>3. API 查询</strong>
+                实时缓存、回放、候选船、统计、密度分析分流
+              </div>
+              <div>
+                <strong>4. 前端渲染</strong>
+                地图 marker 优先渲染，统计和热力按模式延后加载
+              </div>
+            </div>
+
+            <h3>模块职责</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>模块</th>
+                  <th>职责</th>
+                  <th>性能定位</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>TrackRepository</code></td>
+                  <td>构造 ClickHouse SQL，按场景选择原始表、固定抽稀表、索引表。</td>
+                  <td>默认轨迹走抽稀表；候选走索引表。</td>
+                </tr>
+                <tr>
+                  <td><code>RealtimeService</code></td>
+                  <td>维护最新船位缓存、实时窗口、数据库统计缓存。</td>
+                  <td>启动同步预热默认实时窗口，数据库统计异步预热。</td>
+                </tr>
+                <tr>
+                  <td><code>ApiController</code></td>
+                  <td>校验时间窗、bbox、zoom、抽稀参数，返回普通或 compact JSON。</td>
+                  <td>限制多船数量和候选批次规模；统计接口可独立延后调用。</td>
+                </tr>
+                <tr>
+                  <td><code>TrackSimplificationService</code></td>
+                  <td>保留本地 SED-RDP 抽稀工具，当前 <code>backfillAll()</code> 返回 0。</td>
+                  <td>默认不参与主查询链路。</td>
+                </tr>
+                <tr>
+                  <td><code>TrackSimplificationBackfillRunner</code></td>
+                  <td>仅在带 <code>ship.simplify.backfill</code> 参数时触发后填充入口。</td>
+                  <td>执行后关闭应用上下文。</td>
+                </tr>
+                <tr>
+                  <td><code>public/app.js</code></td>
+                  <td>模式切换、API 调用、轨迹播放、地图图层维护。</td>
+                  <td>首屏先调 <code>/api/config/map</code> 和 <code>/api/realtime/latest</code>；统计延后、可关闭、可中断。</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <h3>功能面</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>能力</th>
+                  <th>核心接口</th>
+                  <th>主要数据源</th>
+                  <th>展示策略</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>实时位置</td>
+                  <td><code>/api/realtime/latest</code></td>
+                  <td>内存缓存，缓存未命中时回查原始表</td>
+                  <td>当前窗口每船最新 marker，优先完成首屏可见船只。</td>
+                </tr>
+                <tr>
+                  <td>统计面板</td>
+                  <td><code>/api/stats/realtime-summary</code>、<code>/api/stats/global-summary</code>、<code>/api/stats/database</code></td>
+                  <td>数据库统计缓存 + 原始表窗口统计 + 抽稀表密度格数</td>
+                  <td>只返回汇总值；由前端延后调度。</td>
+                </tr>
+                <tr>
+                  <td>候选船与多船统计</td>
+                  <td><code>/api/stats/multi-summary</code>、<code>/api/tracks/candidates</code></td>
+                  <td>索引表 + 原始表窗口统计</td>
+                  <td>框选后先分页筛候选，再决定是否加载轨迹。</td>
+                </tr>
+                <tr>
+                  <td>单船轨迹</td>
+                  <td><code>/api/stats/single-track-points</code>、<code>/api/tracks/single</code></td>
+                  <td>原始表或固定抽稀表</td>
+                  <td>单船轨迹线、marker、回放进度。</td>
+                </tr>
+                <tr>
+                  <td>多船轨迹</td>
+                  <td><code>/api/stats/multi-track-points</code>、<code>/api/tracks/multi</code></td>
+                  <td>固定抽稀表；raw 请求也回退到抽稀路径</td>
+                  <td>返回所选船在时间窗内的轨迹，不按 bbox 截断。</td>
+                </tr>
+                <tr>
+                  <td>态势分析</td>
+                  <td><code>/api/analysis/density</code></td>
+                  <td>300 秒抽稀表</td>
+                  <td>前端按时间片请求；后端每次返回静态网格。</td>
+                </tr>
+                <tr>
+                  <td>全域回放</td>
+                  <td><code>/api/tracks/global-segment</code></td>
+                  <td>固定 1800 秒抽稀位置帧</td>
+                  <td>播放时刻位置 marker，不绘全域轨迹线。</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+
+          <section id="schema">
+            <h2>建表与表结构</h2>
+            <p>
+              当前仓库内的 DDL 只保留三张运行时表。抽稀和索引的写入链路在当前代码里是“读已存在表”，
+              并没有把物化视图 DDL 一并放进仓库。
+            </p>
+
+            <h3>原始轨迹表</h3>
+            <pre><code>CREATE TABLE IF NOT EXISTS tb_ais_track_raw
+(
+  ship_serial_no LowCardinality(String),
+  longitude_wgs Float32 CODEC(Gorilla),
+  latitude_wgs Float32 CODEC(Gorilla),
+  ground_speed Float32 CODEC(Gorilla),
+  ground_course Float32 CODEC(Gorilla),
+  event_time DateTime('Asia/Shanghai') CODEC(Delta, ZSTD),
+  type UInt8
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(event_time)
+ORDER BY (ship_serial_no, event_time)
+TTL event_time + toIntervalYear(1)
+SETTINGS index_granularity = 8192;</code></pre>
+
+            <h3>固定抽稀轨迹表</h3>
+            <pre><code>CREATE TABLE IF NOT EXISTS tb_ais_track_thin
+(
+  ship_serial_no LowCardinality(String),
+  bucket_size UInt32,
+  bucket_start DateTime('Asia/Shanghai') CODEC(Delta, ZSTD),
+  event_time DateTime('Asia/Shanghai') CODEC(Delta, ZSTD),
+  longitude_wgs Float32 CODEC(Gorilla),
+  latitude_wgs Float32 CODEC(Gorilla),
+  ground_speed Float32 CODEC(Gorilla),
+  ground_course Float32 CODEC(Gorilla),
+  type UInt8,
+  grid_05_lng Int32 MATERIALIZED toInt32(floor((longitude_wgs + 180) / 0.05)),
+  grid_05_lat Int32 MATERIALIZED toInt32(floor((latitude_wgs + 90) / 0.05)),
+  grid_5_lng Int32 MATERIALIZED toInt32(floor((longitude_wgs + 180) / 0.5)),
+  grid_5_lat Int32 MATERIALIZED toInt32(floor((latitude_wgs + 90) / 0.5)),
+  dedup_version UInt32 MATERIALIZED toUInt32(4294967295 - toUnixTimestamp(event_time))
+)
+ENGINE = ReplacingMergeTree(dedup_version)
+PARTITION BY toYYYYMM(bucket_start)
+ORDER BY (ship_serial_no, bucket_size, bucket_start)
+TTL bucket_start + toIntervalYear(1)
+SETTINGS index_granularity = 8192;</code></pre>
+
+            <h3>船舶时空索引表</h3>
+            <pre><code>CREATE TABLE IF NOT EXISTS tb_ship_bucket_index
+(
+  grid_05_lng Int32,
+  grid_05_lat Int32,
+  grid_5_lng Int32,
+  grid_5_lat Int32,
+  ship_serial_no LowCardinality(String),
+  bucket_start DateTime('Asia/Shanghai'),
+  min_lng AggregateFunction(min, Float32),
+  max_lng AggregateFunction(max, Float32),
+  min_lat AggregateFunction(min, Float32),
+  max_lat AggregateFunction(max, Float32),
+  point_count AggregateFunction(count)
+)
+ENGINE = AggregatingMergeTree
+PARTITION BY toYYYYMM(bucket_start)
+ORDER BY (grid_05_lng, grid_05_lat, bucket_start, ship_serial_no)
+TTL bucket_start + toIntervalYear(1)
+SETTINGS index_granularity = 8192;</code></pre>
+
+            <h3>表设计说明</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>设计点</th>
+                  <th>说明</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>原始表排序键</td>
+                  <td><code>(ship_serial_no, event_time)</code> 适合单船轨迹和单船点数统计按船号裁剪。</td>
+                </tr>
+                <tr>
+                  <td>抽稀表排序键</td>
+                  <td><code>(ship_serial_no, bucket_size, bucket_start)</code> 适合按船号与固定桶查询轨迹。</td>
+                </tr>
+                <tr>
+                  <td>索引表排序键</td>
+                  <td>细网格优先，随后时间桶和船号，适合 bbox 候选船查询先缩小读取范围。</td>
+                </tr>
+                <tr>
+                  <td>去重版本</td>
+                  <td>同船同粒度同桶重复写入时，用 <code>dedup_version</code> 保留更早事件点。</td>
+                </tr>
+                <tr>
+                  <td>聚合状态</td>
+                  <td>索引表只保存 bbox 判定和点数所需状态，候选阶段不回原始点明细。</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+
+          <section id="query-principles">
+            <h2>查询原则</h2>
+            <h3>抽稀策略</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>模式</th>
+                  <th>数据源</th>
+                  <th>规则</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>auto</code></td>
+                  <td><code>tb_ais_track_thin</code></td>
+                  <td>zoom &lt;= 7 取 1800 秒，8-10 取 300 秒，zoom &gt;= 11 取 60 秒。</td>
+                </tr>
+                <tr>
+                  <td><code>manual</code></td>
+                  <td><code>tb_ais_track_thin</code></td>
+                  <td>前端传桶秒数，服务端归一到 60、300、1800 中最近粒度。</td>
+                </tr>
+                <tr>
+                  <td><code>raw</code></td>
+                  <td><code>tb_ais_track_raw</code> 仅单船</td>
+                  <td>只有 <code>mode=single</code> 会命中原始表；多船和全域会回退到固定抽稀路径。</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <h3>通用约束</h3>
+            <ul>
+              <li>所有时间窗口采用左闭右开过滤：<code>event_time &gt;= start</code> 且 <code>event_time &lt; end</code>。</li>
+              <li>抽稀表按桶边界过滤时向前回退一个桶，再以真实 <code>event_time</code> 二次过滤，避免窗口起点落在桶中间漏点。</li>
+              <li>单船原始表和单船抽稀表查询使用 <code>PREWHERE ship_serial_no</code>。</li>
+              <li>多船 ID 列表受 <code>maxMultiShips</code> 限制，候选船分页受 <code>maxCandidateBatchSize</code> 限制。</li>
+              <li>轨迹明细 SQL 不写业务 <code>LIMIT</code>；返回规模依靠抽稀粒度、时间窗、船舶数量和候选分页控制。</li>
+              <li>热力密度必须携带 bbox；统计类接口允许独立调用，但前端应延后发起。</li>
+              <li><code>stepMinutes</code> 只由前端用于拆分态势分析时间片，后端密度 SQL 不按该参数分桶。</li>
+              <li>信号源类型由 <code>type</code> 映射；AIS 视为 <code>type IN (1,4,5,7)</code>。</li>
+              <li><code>/api/tracks/multi</code> 当前控制器没有把 body 里的 bbox 传给仓库，轨迹返回的是所选船在时间窗内的点，不做框选截断。</li>
+            </ul>
+          </section>
+
+          <section id="feature-sql">
+            <h2>功能查询逻辑与 SQL</h2>
+            <p>
+              下列 SQL 按当前仓库查询形态整理。占位参数写法沿用 ClickHouse HTTP 参数：
+              <code>{shipId: String}</code>、<code>{shipIds: Array(String)}</code>、<code>{bucketSeconds: UInt32}</code>。
+              时间参数统一通过 <code>parseDateTime64BestEffort(..., 'Asia/Shanghai')</code> 解析。
+              文档只展示当前接口实际可命中的 SQL 路径：单船可 raw，多船和全域只走抽稀表。
+            </p>
+
+            <h3>实时最新船位</h3>
+            <p>
+              <code>/api/realtime/latest</code> 先由 <code>RealtimeService</code> 判断内存缓存是否命中。
+              缓存未命中时，原始表按窗口聚合每艘船的最新位置，并用结果刷新缓存。
+            </p>
+            <pre><code>SELECT
+  ship_serial_no AS shipId,
+  ship_serial_no AS shipName,
+  argMax(longitude_wgs, event_time) AS lng,
+  argMax(latitude_wgs, event_time) AS lat,
+  argMax(ground_speed, event_time) AS speed,
+  argMax(ground_course, event_time) AS heading,
+  argMax(if(type IN (1, 4, 5, 7), toUInt8(1), toUInt8(0)), event_time) AS isAis,
+  argMax(type, event_time) AS shipType,
+  toString(max(event_time)) AS time
+FROM tb_ais_track_raw
+WHERE event_time &gt;= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')
+  AND event_time &lt; parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai')
+GROUP BY ship_serial_no
+ORDER BY ship_serial_no ASC
+LIMIT {limit: UInt32};</code></pre>
+
+            <h3>数据库总量与窗口统计</h3>
+            <p>
+              数据库总量在应用启动后异步预热到 <code>RealtimeService</code> 内存；
+              <code>/api/stats/database</code> 直接读缓存。窗口统计按需查询原始表。
+            </p>
+            <pre><code>-- 全库统计
+SELECT
+  count() AS trackPoints,
+  uniqCombined64(ship_serial_no) AS ships
+FROM tb_ais_track_raw;
+
+-- 时间窗口统计，可选追加 bbox 过滤
+SELECT
+  count() AS trackPoints,
+  uniqCombined64(ship_serial_no) AS ships
+FROM tb_ais_track_raw
+WHERE event_time &gt;= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')
+  AND event_time &lt; parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai')
+  -- AND longitude_wgs BETWEEN {west: Float64} AND {east: Float64}
+  -- AND latitude_wgs BETWEEN {south: Float64} AND {north: Float64};</code></pre>
+
+            <h3>统计接口</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>接口</th>
+                  <th>查询来源</th>
+                  <th>说明</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>/api/stats/realtime-summary</code></td>
+                  <td>缓存 + 原始表窗口统计 + 300 秒抽稀表密度格子</td>
+                  <td>返回数据库、窗口和视野热力格数量。</td>
+                </tr>
+                <tr>
+                  <td><code>/api/stats/global-summary</code></td>
+                  <td>缓存 + 原始表窗口统计</td>
+                  <td>返回数据库总量与全局窗口点数。</td>
+                </tr>
+                <tr>
+                  <td><code>/api/stats/multi-summary</code></td>
+                  <td>原始表窗口统计</td>
+                  <td>返回窗口总点数、bbox 点数和船数。</td>
+                </tr>
+                <tr>
+                  <td><code>/api/stats/single-track-points</code></td>
+                  <td>原始表</td>
+                  <td>按单船和时间窗统计点数。</td>
+                </tr>
+                <tr>
+                  <td><code>/api/stats/multi-track-points</code></td>
+                  <td>原始表</td>
+                  <td>按多船和时间窗统计点数。</td>
+                </tr>
+                <tr>
+                  <td><code>/api/stats/database</code></td>
+                  <td>缓存</td>
+                  <td>直接返回预热后的全库统计结果。</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <h3>单船轨迹</h3>
+            <p>
+              默认查询固定抽稀表；窗口先按 <code>bucket_start</code> 裁剪，再按实际点时间过滤。
+              原始模式改查原始表，不做在线桶聚合。
+            </p>
+            <pre><code>-- auto/manual 固定抽稀路径
+SELECT
+  {shipId: String} AS shipId,
+  ship_serial_no AS shipName,
+  longitude_wgs AS lng,
+  latitude_wgs AS lat,
+  ground_speed AS speed,
+  ground_course AS heading,
+  if(type IN (1, 4, 5, 7), toUInt8(1), toUInt8(0)) AS isAis,
+  type AS shipType,
+  toString(event_time) AS time
+FROM tb_ais_track_thin
+PREWHERE ship_serial_no = {shipId: String}
+WHERE bucket_size = {bucketSeconds: UInt32}
+  AND bucket_start &gt;= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')
+      - toIntervalSecond({bucketSeconds: UInt32})
+  AND bucket_start &lt; parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai')
+  AND event_time &gt;= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')
+  AND event_time &lt; parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai')
+ORDER BY time ASC;
+
+-- raw 原始点路径
+SELECT
+  {shipId: String} AS shipId,
+  ship_serial_no AS shipName,
+  longitude_wgs AS lng,
+  latitude_wgs AS lat,
+  ground_speed AS speed,
+  ground_course AS heading,
+  if(type IN (1, 4, 5, 7), toUInt8(1), toUInt8(0)) AS isAis,
+  type AS shipType,
+  toString(event_time) AS time
+FROM tb_ais_track_raw
+PREWHERE ship_serial_no = {shipId: String}
+WHERE event_time &gt;= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')
+  AND event_time &lt; parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai')
+ORDER BY time ASC;</code></pre>
+
+            <h3>单船原始点数量</h3>
+            <pre><code>SELECT count() AS trackPoints
+FROM tb_ais_track_raw
+PREWHERE ship_serial_no = {shipId: String}
+WHERE event_time &gt;= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')
+  AND event_time &lt; parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai');</code></pre>
+
+            <h3>多船候选船查询</h3>
+            <p>
+              多船流程为“框选 -&gt; 索引表候选分页 -&gt; 选择 shipIds -&gt; 抽稀表轨迹加载 -&gt; 前端播放窗口渲染”。
+              候选阶段只读取 <code>tb_ship_bucket_index</code>，返回船号、桶时间范围和点数，不补船型；船型随已选船轨迹返回。
+            </p>
+            <pre><code>SELECT
+  ship_serial_no AS shipId,
+  ship_serial_no AS shipName,
+  toString(min(bucket_start)) AS firstTime,
+  toString(max(bucket_start)) AS lastTime,
+  countMerge(point_count) AS points
+FROM tb_ship_bucket_index
+WHERE bucket_start &gt;= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')
+  AND bucket_start &lt; parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai')
+  AND grid_05_lng BETWEEN {westGrid05Lng: Int32} AND {eastGrid05Lng: Int32}
+  AND grid_05_lat BETWEEN {southGrid05Lat: Int32} AND {northGrid05Lat: Int32}
+GROUP BY ship_serial_no
+HAVING maxMerge(max_lng) &gt;= {west: Float64}
+  AND minMerge(min_lng) &lt;= {east: Float64}
+  AND maxMerge(max_lat) &gt;= {south: Float64}
+  AND minMerge(min_lat) &lt;= {north: Float64}
+ORDER BY points DESC, shipId ASC
+LIMIT {limit: UInt32} OFFSET {offset: UInt32};</code></pre>
+
+            <h3>多船轨迹</h3>
+            <p>
+              多船轨迹在候选船选择后读取所选船号集合。当前控制器没有把 body 里的 bbox 传到仓库，
+              因而返回的是所选船在时间窗内的轨迹，而不是框内片段。<code>samplingMode=raw</code> 对多船路径会回退到抽稀表。
+            </p>
+            <pre><code>SELECT
+  ship_serial_no AS shipId,
+  ship_serial_no AS shipName,
+  longitude_wgs AS lng,
+  latitude_wgs AS lat,
+  ground_speed AS speed,
+  ground_course AS heading,
+  if(type IN (1, 4, 5, 7), toUInt8(1), toUInt8(0)) AS isAis,
+  type AS shipType,
+  toString(event_time) AS time
+FROM tb_ais_track_thin
+WHERE bucket_size = {bucketSeconds: UInt32}
+  AND ship_serial_no IN {shipIds: Array(String)}
+  AND bucket_start &gt;= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')
+      - toIntervalSecond({bucketSeconds: UInt32})
+  AND bucket_start &lt; parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai')
+  AND event_time &gt;= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')
+  AND event_time &lt; parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai')
+ORDER BY time ASC, shipId ASC;</code></pre>
+
+            <h3>多船原始点数量</h3>
+            <pre><code>SELECT count() AS trackPoints
+FROM tb_ais_track_raw
+WHERE ship_serial_no IN {shipIds: Array(String)}
+  AND event_time &gt;= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')
+  AND event_time &lt; parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai');</code></pre>
+
+            <h3>态势密度热力</h3>
+            <p>
+              热力读取 300 秒抽稀表，按 zoom 选择经纬网格：zoom &gt;= 11 为 0.05 度，
+              zoom 8-10 为 0.1 度，低 zoom 为 0.5 度。前端按 <code>stepMinutes</code> 拆分时间片逐帧请求，
+              后端每次只返回当前时间片的静态热力点，不在 SQL 中按 <code>stepMinutes</code> 二次分桶。
+            </p>
+            <pre><code>SELECT
+  floor(longitude_wgs / {grid: Float64}) * {grid: Float64}
+      + ({grid: Float64} / 2) AS lng,
+  floor(latitude_wgs / {grid: Float64}) * {grid: Float64}
+      + ({grid: Float64} / 2) AS lat,
+  count() AS count,
+  uniqCombined64(ship_serial_no) AS ships
+FROM tb_ais_track_thin
+WHERE bucket_size = 300
+  AND bucket_start &gt;= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')
+      - toIntervalSecond(300)
+  AND bucket_start &lt; parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai')
+  AND event_time &gt;= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')
+  AND event_time &lt; parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai')
+  AND longitude_wgs BETWEEN {west: Float64} AND {east: Float64}
+  AND latitude_wgs BETWEEN {south: Float64} AND {north: Float64}
+GROUP BY lng, lat
+ORDER BY count DESC
+LIMIT {limit: UInt32};</code></pre>
+
+            <h3>密度格子数量</h3>
+            <p>统计面板只需要格子数时，不返回每个热力格明细。</p>
+            <pre><code>SELECT count() AS cells
+FROM
+(
+  SELECT
+    floor(longitude_wgs / {grid: Float64}) * {grid: Float64}
+        + ({grid: Float64} / 2) AS lng,
+    floor(latitude_wgs / {grid: Float64}) * {grid: Float64}
+        + ({grid: Float64} / 2) AS lat
+  FROM tb_ais_track_thin
+  WHERE bucket_size = 300
+    AND bucket_start &gt;= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')
+        - toIntervalSecond(300)
+    AND bucket_start &lt; parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai')
+    AND event_time &gt;= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')
+    AND event_time &lt; parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai')
+    -- 可选 bbox 过滤
+  GROUP BY lng, lat
+) AS density_cells;</code></pre>
+
+            <h3>全域回放</h3>
+            <p>
+              全域路径固定从 1800 秒抽稀点中按船和 30 分钟桶取位置帧。
+              这样前端驱动时间轴时只维护当前时刻船位，避免全域轨迹线过载。<code>samplingMode=raw</code> 在全域路径会回退到抽稀表。
+            </p>
+            <pre><code>SELECT
+  ship_serial_no AS shipId,
+  ship_serial_no AS shipName,
+  argMax(longitude_wgs, event_time) AS lng,
+  argMax(latitude_wgs, event_time) AS lat,
+  argMax(ground_speed, event_time) AS speed,
+  argMax(ground_course, event_time) AS heading,
+  argMax(if(type IN (1, 4, 5, 7), toUInt8(1), toUInt8(0)), event_time) AS isAis,
+  argMax(type, event_time) AS shipType,
+  toString(max(event_time)) AS time,
+  toString(bucket_start) AS bucketStart
+FROM tb_ais_track_thin
+WHERE bucket_size = 1800
+  AND bucket_start &gt;= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')
+      - toIntervalSecond(1800)
+  AND bucket_start &lt; parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai')
+  AND event_time &gt;= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')
+  AND event_time &lt; parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai')
+GROUP BY ship_serial_no, bucket_start
+ORDER BY time ASC, shipId ASC;</code></pre>
+          </section>
+
+          <section id="optimization">
+            <h2>流程优化设计</h2>
+            <h3>首屏加载优化</h3>
+            <ol>
+              <li>应用启动时先同步预热默认实时窗口的最新船位缓存。</li>
+              <li>全库统计异步预热，不阻塞最新船位缓存准备。</li>
+              <li>页面初始化先请求 <code>/api/config/map</code>，建图后立即执行 <code>loadLatest()</code> 请求最新船位并渲染 marker。</li>
+              <li>前端通过 <code>deferAuxiliaryWork()</code>、统计开关和摘要调度器再请求统计、热力格数等辅助信息。</li>
+            </ol>
+
+            <h3>轨迹加载优化</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>环节</th>
+                  <th>设计</th>
+                  <th>收益</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>抽稀</td>
+                  <td>写入链路维护固定抽稀点，读请求不在原始表在线分桶聚合。</td>
+                  <td>读请求不在原始表在线分桶聚合。</td>
+                </tr>
+                <tr>
+                  <td>框选</td>
+                  <td>候选船查询先走细网格索引，再做 bbox 相交。</td>
+                  <td>避免从原始点找每艘候选船。</td>
+                </tr>
+                <tr>
+                  <td>表选择</td>
+                  <td>默认 <code>auto/manual</code> 读抽稀表；<code>raw</code> 仅单船读原始表。</td>
+                  <td>多船和全域不会因 raw 参数放大查询。</td>
+                </tr>
+                <tr>
+                  <td>响应</td>
+                  <td>实时、多船、全域返回 compact 数组结构。</td>
+                  <td>减少 JSON 字段重复开销。</td>
+                </tr>
+                <tr>
+                  <td>渲染</td>
+                  <td>轨迹线分批追加；多船只显示播放窗口轨迹；全域只显示位置。</td>
+                  <td>控制浏览器主线程压力。</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <h3>统计与分析隔离</h3>
+            <ul>
+              <li>数据库总量统计从 <code>RealtimeService</code> 缓存取值，不在每次实时船位刷新时扫描全库。</li>
+              <li>热力密度从 300 秒抽稀表聚合，且要求当前视野 bbox。</li>
+              <li>态势分析时间步进由前端拆成多个小窗口请求，后端每次只处理一个静态时间片。</li>
+              <li>统计请求有本地缓存、请求中断和开关控制；关闭统计后不再请求统计接口。</li>
+              <li>API trace 默认不记录 <code>/api/stats/*</code> 和配置接口，避免统计链路干扰主链路观测。</li>
+              <li>请求指标和日志记录只保留接口级耗时、数据库调用量和汇总字段，不进入轨迹点级循环。</li>
+            </ul>
+
+            <h3>可选索引验证</h3>
+            <p>
+              原始表已有按船号与时间排序的主键。若窗口统计或原始 bbox 查询仍有压力，可在低峰验证
+              <code>event_time</code> 与经纬度跳数索引。新增索引后先用 <code>EXPLAIN indexes = 1</code>
+              对比 granule 裁剪，再决定是否物化历史数据。该脚本只作为人工维护项，不在应用启动、安装或测试时自动执行。
+            </p>
+            <pre><code>ALTER TABLE tb_ais_track_raw
+  ADD INDEX IF NOT EXISTS idx_event_time_minmax event_time TYPE minmax GRANULARITY 4;
+
+ALTER TABLE tb_ais_track_raw
+  ADD INDEX IF NOT EXISTS idx_lon_lat_minmax
+  (longitude_wgs, latitude_wgs) TYPE minmax GRANULARITY 4;</code></pre>
+          </section>
+
+          <section id="frontend">
+            <h2>前端页面设计</h2>
+            <h3>页面结构</h3>
+            <div class="grid two">
+              <div>
+                <h4>左侧模式导航</h4>
+                <ul>
+                  <li>实时位置</li>
+                  <li>态势分析</li>
+                  <li>单船轨迹</li>
+                  <li>多船轨迹</li>
+                  <li>全域回放</li>
+                </ul>
+              </div>
+              <div>
+                <h4>主工作区</h4>
+                <ul>
+                  <li>地图与图层：底图、轨迹线、回放轨迹、框选矩形、船位 marker、热力。</li>
+                  <li>右侧面板：统计指标、时间输入、模式操作控件、播放控制。</li>
+                  <li>多船候选抽屉：类型过滤、分页、批量选择、加载轨迹。</li>
+                </ul>
+              </div>
+            </div>
+
+            <h3>各模式交互</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>模式</th>
+                  <th>输入控件</th>
+                  <th>主动作</th>
+                  <th>渲染结果</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>实时位置</td>
+                  <td>时间点、前推分钟、信号源类型、已选船。</td>
+                  <td>刷新全部最新船位；点击船可预览一小时轨迹。</td>
+                  <td>最新船位 marker、悬浮信息、视野船数。</td>
+                </tr>
+                <tr>
+                  <td>态势分析</td>
+                  <td>开始时间、结束时间、步进分钟、当前地图视野。</td>
+                  <td>按当前视野生成热力。</td>
+                  <td>时间演进密度热力与热力统计。</td>
+                </tr>
+                <tr>
+                  <td>单船轨迹</td>
+                  <td>船舶编号、时间点、前后小时、抖动抑制、抽稀模式。</td>
+                  <td>查询单船轨迹并播放。</td>
+                  <td>单船轨迹线、当前位置、进度条。</td>
+                </tr>
+                <tr>
+                  <td>多船轨迹</td>
+                  <td>时间范围、框选范围、候选类型、候选分页与选择。</td>
+                  <td>框选后加载候选，再加载已选船轨迹。</td>
+                  <td>播放窗口内多船轨迹与 marker。</td>
+                </tr>
+                <tr>
+                  <td>全域回放</td>
+                  <td>时间点、向前小时、抽稀模式。</td>
+                  <td>加载全域片段。</td>
+                  <td>当前播放帧的全域船位。</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <h3>前端性能设计</h3>
+            <ul>
+              <li><code>switchMode()</code> 切换模式时清理轨迹播放状态和图层，避免旧图层叠加。</li>
+              <li><code>renderTracks()</code> 先准备分组与播放运行时，再由批处理追加线要素。</li>
+              <li>多船播放只绘制当前播放时刻向前约 30 分钟轨迹窗口，防止多船全线常驻。</li>
+              <li>全域播放只刷新位置 marker，不绘制全域轨迹线。</li>
+              <li>性能模式下单船播放走增量 marker/轨迹同步，减少重复重建。</li>
+              <li>候选船按批次和页面加载，抽屉内保存已加载页面与选择状态。</li>
+              <li>统计面板由 <code>stats-toggle</code> 控制；关闭时中断未完成统计请求并清空统计摘要状态。</li>
+              <li>统计接口使用 <code>getCachedJson()</code> 短缓存，重复切换或刷新时优先复用已有统计结果。</li>
+              <li>实时模式低 zoom 热力通过 <code>scheduleRealtimeHeat()</code> 延后触发，不阻塞 marker 首屏绘制。</li>
+              <li>接口耗时浮层只跟踪主业务接口，统计接口不进入前端 API trace 历史。</li>
+            </ul>
+          </section>
+
+          <section id="risks">
+            <h2>约束与后续建议</h2>
+            <h3>当前约束</h3>
+            <ul>
+              <li>固定抽稀粒度只有 60、300、1800 秒，新增粒度需要新增或调整写入侧维护方案。</li>
+              <li>候选船索引按 30 分钟桶近似时间范围，首末时间是桶时间，不等于原始首末事件时间。</li>
+              <li>多船轨迹当前在选船后不按原框选 bbox 截断，前端语义应明确为“所选船时间窗轨迹”。</li>
+              <li>单船原始模式可能显著放大返回量，需保持显式入口，不应成为默认值。</li>
+            </ul>
+
+            <h3>建议验收项</h3>
+            <ol>
+              <li>分别验证实时首屏缓存命中、缓存未命中、ClickHouse 异常时的响应行为。</li>
+              <li>用 <code>EXPLAIN indexes = 1</code> 对比候选船索引查询与原始表窗口统计读取范围。</li>
+              <li>以典型 zoom 级别验证抽稀桶选择、返回点数、前端帧率。</li>
+              <li>压测多船候选分页和多船轨迹加载上限，确认不影响实时船位刷新。</li>
+            </ol>
+          </section>
+        </article>
+      </main>
+    </div>
+  </body>
+</html>

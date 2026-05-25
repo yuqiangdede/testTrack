@@ -164,12 +164,36 @@ label {
   letter-spacing: 0;
 }
 
+.topbar-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
 .status {
   color: #1f66d1;
   font-size: 14px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.stats-toggle {
+  border: 1px solid #bed0ea;
+  border-radius: 999px;
+  background: #eaf2ff;
+  color: #1f66d1;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.stats-toggle.is-off {
+  border-color: #d3dae8;
+  background: #eef2f7;
+  color: #536176;
 }
 
 .api-trace {
@@ -453,6 +477,38 @@ label {
   flex: 0 0 auto;
 }
 
+.type-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 0 0 12px;
+  padding: 10px;
+  border: 1px solid #dbe5f4;
+  border-radius: 8px;
+}
+
+.type-filter legend {
+  padding: 0 4px;
+}
+
+.type-filter label,
+.selected-ships-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.type-filter label {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.selected-ships-row {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
 .panel-note {
   padding: 10px 12px;
   border: 1px dashed #dbe5f4;
@@ -685,6 +741,53 @@ label {
   max-width: 104px;
 }
 
+.button-row .performance-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  color: #1b2a44;
+  white-space: nowrap;
+}
+
+.button-row .performance-toggle input {
+  width: auto;
+}
+
+.analysis-progress {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #dbe5f4;
+  border-radius: 8px;
+  background: #f8fbff;
+  min-width: 0;
+}
+
+.analysis-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #60708a;
+  font-size: 12px;
+}
+
+.analysis-progress-head strong {
+  color: #0e4fae;
+  font-size: 13px;
+}
+
+.analysis-progress input[type="range"] {
+  padding: 0;
+}
+
+.analysis-progress p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sampling-grid label {
   display: grid;
   gap: 6px;
@@ -793,5 +896,13 @@ label {
 
   .topbar h1 {
     font-size: 18px;
+  }
+
+  .topbar-meta {
+    gap: 8px;
+  }
+
+  .stats-toggle {
+    padding: 7px 10px;
   }
 }

@@ -11,26 +11,25 @@ public class ShipTrackConfig {
   public MapConfig map = new MapConfig();
 
   public static class ClickHouse {
-    public String jdbcUrl = "jdbc:clickhouse://127.0.0.1:8123/default";
+    public String jdbcUrl = "jdbc:clickhouse://10.100.1.23:8461/track";
     public String username = "default";
-    public String password = "";
+    public String password = "123456";
   }
 
   public static class Tables {
-    public String track = "tb_ais_event_simple_info";
+    public String track = "tb_ais_track_raw";
     public String bucketIndex = "tb_ship_bucket_index";
-    public String simplifiedTrack = "tb_ship_track_simplified";
-    public String simplifyOffset = "tb_ship_simplify_offset";
+    public String simplifiedTrack = "tb_ais_track_thin";
   }
 
   public static class Columns {
     public String shipId = "ship_serial_no";
-    public String shipName = "ship_name";
     public String eventTime = "event_time";
     public String longitude = "longitude_wgs";
     public String latitude = "latitude_wgs";
     public String speed = "ground_speed";
     public String heading = "ground_course";
+    public String type = "type";
   }
 
   public static class BucketIndexColumns {
@@ -40,13 +39,13 @@ public class ShipTrackConfig {
     public String maxLng = "max_lng";
     public String minLat = "min_lat";
     public String maxLat = "max_lat";
-    public String shipName = "ship_name";
-    public String isAis = "isAis";
   }
 
   public static class Query {
     public int latestLookbackHours = 5;
     public int realtimeWindowMinutes = 10;
+    public String defaultRealtimeAnchor = "2026-05-16 00:00:00";
+    public int defaultRealtimeWindowMinutes = 30;
     public int clickhouseTimeoutSeconds = 30;
     public boolean logSql = true;
     public int latestPageSize = 30000;
@@ -64,7 +63,7 @@ public class ShipTrackConfig {
   }
 
   public static class Simplify {
-    public boolean enabled = true;
+    public boolean enabled = false;
     public int shipBatchSize = 50;
     public int rowsPerShipBatch = 20000;
     public List<Double> levelTolerances = List.of(0.0, 0.002, 0.006, 0.015);

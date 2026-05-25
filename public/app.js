@@ -3,8 +3,25 @@
   config: null,
   map: null,
   latest: [],
+  realtimeViewportMode: "points",
   realtimeWindow: null,
+  realtimeSelection: new Map(),
+  realtimeHeat: {
+    items: [],
+    seq: 0,
+    timer: null
+  },
   density: [],
+  densityEvolution: {
+    frame: null,
+    timer: null,
+    seq: 0,
+    frames: [],
+    index: 0,
+    cache: new Map(),
+    bbox: null,
+    zoom: null
+  },
   trackPoints: [],
   candidates: [],
   selectedShips: [],
@@ -47,9 +64,11 @@
     performanceMode: true,
     prepared: false,
     groupedTracks: [],
-    shipRuntime: new Map()
+    shipRuntime: new Map(),
+    timer: null
   },
   stats: {
+    enabled: true,
     databaseTrackPoints: 0,
     databaseShips: 0,
     windowTrackPoints: 0,
@@ -67,6 +86,15 @@
     summarySeq: 0
   },
   global: {
+    wsEnabled: true,
+    showTracks: false,
+    allTrackPoints: [],
+    ws: {
+      socket: null,
+      seq: 0,
+      trace: null,
+      closing: false
+    },
     stats: {
       databaseTrackPoints: 0,
       databaseShips: 0,
@@ -86,12 +114,15 @@
     playbackTrackLayer: null,
     markerSource: null,
     markerLayer: null,
+    endpointSource: null,
+    endpointLayer: null,
     rectangleSource: null,
     rectangleLayer: null,
     drawBoxInteraction: null,
     lines: [],
     lineQueue: [],
     lineTimer: null,
+    hoverTrackShip: null,
     trackRenderSeq: 0,
     trackRenderCallbacks: [],
     realtimeRenderTimer: null,
@@ -107,6 +138,7 @@
     realtimeHitGrid: new Map(),
     realtimeVisibleCount: 0,
     realtimeConfirmShipId: "",
+    realtimePreviewSeq: 0,
     markers: [],
     rectangle: null
   },
@@ -129,24 +161,54 @@ const REALTIME_HIT_CELL_SIZE = 32;
 const REALTIME_HIT_RADIUS = 12;
 const REALTIME_DRAW_BUDGET_MS = 8;
 const REALTIME_DRAW_BATCH = 2500;
-const AMAP_TILE_URL = "https://webrd0{sub}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}";
+const AMAP_TILE_URL = "https://10.100.1.3/GeoData_mbs/map/GaodeMap/img/{z}/{x}/{y}.png";
 const STATS_CACHE_TTL_MS = 5 * 60 * 1000;
 const SUMMARY_CACHE_TTL_MS = 30 * 1000;
 const API_TRACE_MAX_HISTORY = 3;
 const API_TRACE_HIDDEN_KEY = "shiptrack.apiTrace.hidden";
+const STATS_ENABLED_KEY = "shiptrack.stats.enabled";
+const STATS_REQUEST_KEYS = [
+  "stats-database",
+  "stats-realtime-summary",
+  "stats-global-summary",
+  "stats-multi-summary",
+  "stats-single-track-points",
+  "stats-multi-track-points"
+];
 const statsRequestCache = new Map();
 const PLAYBACK_SPEED_OPTIONS = [1, 2, 4, 8, 16, 64, 128];
-const DEFAULT_GLOBAL_REPLAY_TIME = "2026-04-19T21:00:00";
+const DEFAULT_REALTIME_TIME = "2026-05-24T23:59:59";
+const DEFAULT_GLOBAL_REPLAY_TIME = "2026-05-24T23:59:59";
+const DEFAULT_ANALYSIS_START_TIME = "2026-05-24T00:00:00";
+const DEFAULT_ANALYSIS_END_TIME = "2026-05-24T23:59:59";
+const DEFAULT_ANALYSIS_STEP_MINUTES = 30;
 const TRACK_PALETTE = ["#2563eb", "#16a34a", "#dc2626", "#d97706", "#7c3aed", "#0891b2", "#be123c"];
+const SINGLE_TRACK_PALETTE = ["#facc15"];
+const REALTIME_PREVIEW_TRACK_COLOR = "#6b7280";
+const ANALYSIS_STEP_DURATION_MS = 3000;
 const TRACK_LINE_OPACITY = 0.24;
 const PLAYBACK_LINE_OPACITY = 0.96;
-const MULTI_PLAYBACK_TRAIL_WINDOW_MS = 30 * 60 * 1000;
 const AIS_SHIP_FILL = "rgba(34, 197, 94, 0.75)";
 const AIS_SHIP_STROKE = "#111827";
 const AIS_SHIP_STROKE_WIDTH = 0.8;
 const AIS_SHIP_ICON_WIDTH = 15;
 const AIS_SHIP_ICON_HEIGHT = 7;
 const AIS_SHIP_ICON_CACHE = new Map();
+const SHIP_MARKER_STYLE_CACHE = new Map();
+const apiRequestControllers = new Map();
+const LOW_ZOOM_HEAT_MAX_ZOOM = 8;
+const TRACK_EXTENSION_HOURS = 6;
+const SHIP_TYPES = [
+  { id: "ais", value: 1, label: "AIS", color: "#22c55e", shape: "triangle", filled: true },
+  { id: "radar", value: 2, label: "雷达", color: "#22c55e", shape: "circle", filled: false },
+  { id: "beidou", value: 3, label: "北斗", color: "#22c55e", shape: "triangle", filled: false },
+  { id: "aisbeidou", value: 4, label: "AIS+北斗", color: "#f97316", shape: "triangle", filled: true },
+  { id: "aisradar", value: 5, label: "AIS+雷达", color: "#a855f7", shape: "triangle", filled: true },
+  { id: "beidouradar", value: 6, label: "北斗+雷达", color: "#eab308", shape: "triangle", filled: true },
+  { id: "beidouradarais", value: 7, label: "三源融合", color: "#ef4444", shape: "triangle", filled: true }
+];
+const SHIP_TYPE_BY_ID = new Map(SHIP_TYPES.map((type) => [type.id, type]));
+const SHIP_TYPE_BY_VALUE = new Map(SHIP_TYPES.map((type) => [type.value, type]));
 
 const $ = (id) => document.getElementById(id);
 
@@ -155,6 +217,7 @@ function setStatus(text) {
 }
 
 function showError(text) {
+  if (/abort/i.test(String(text || ""))) return;
   const panel = $("error");
   panel.textContent = text;
   panel.classList.remove("hidden");
@@ -174,10 +237,126 @@ function saveApiTraceHidden(hidden) {
   } catch {}
 }
 
+function loadStatsEnabled() {
+  try {
+    const value = localStorage.getItem(STATS_ENABLED_KEY);
+    return value == null ? true : value === "1";
+  } catch {
+    return true;
+  }
+}
+
+function saveStatsEnabled(enabled) {
+  try {
+    localStorage.setItem(STATS_ENABLED_KEY, enabled ? "1" : "0");
+  } catch {}
+}
+
 function setApiTraceHidden(hidden) {
   state.apiTrace.hidden = Boolean(hidden);
   saveApiTraceHidden(state.apiTrace.hidden);
   renderApiTracePanel();
+}
+
+function isStatsEnabled() {
+  return Boolean(state.stats.enabled);
+}
+
+function abortStatsRequests() {
+  STATS_REQUEST_KEYS.forEach((key) => abortApiRequest(key));
+}
+
+function clearStatsSummaryState() {
+  state.stats.databaseTrackPoints = 0;
+  state.stats.databaseShips = 0;
+  state.stats.windowTrackPoints = 0;
+  state.stats.windowShips = 0;
+  state.stats.windowHeatCells = 0;
+  state.stats.viewportHeatCells = 0;
+  state.stats.singleRawTrackPoints = 0;
+  state.stats.databaseStatsLoaded = false;
+  state.stats.summaryWindowKey = "";
+  state.stats.summarySeq += 1;
+  if (state.stats.summaryTimer) {
+    clearTimeout(state.stats.summaryTimer);
+    state.stats.summaryTimer = null;
+  }
+  state.global.stats.databaseTrackPoints = 0;
+  state.global.stats.databaseShips = 0;
+  state.global.stats.windowTrackPoints = 0;
+  state.global.stats.summaryWindowKey = "";
+  state.global.stats.summarySeq += 1;
+  if (state.global.stats.summaryTimer) {
+    clearTimeout(state.global.stats.summaryTimer);
+    state.global.stats.summaryTimer = null;
+  }
+  state.multi.stats.databaseTrackPoints = 0;
+  state.multi.stats.databaseShips = 0;
+  state.multi.stats.windowTrackPoints = 0;
+  state.multi.stats.windowShips = 0;
+  state.multi.stats.bboxTrackPoints = 0;
+  state.multi.stats.bboxShips = 0;
+  state.multi.selectedRawTrackPoints = 0;
+  state.multi.stats.summaryWindowKey = "";
+  state.multi.stats.summarySeq += 1;
+  state.multi.stats.summaryInFlightKey = "";
+  state.multi.stats.summaryInFlightPromise = null;
+  if (state.multi.stats.summaryTimer) {
+    clearTimeout(state.multi.stats.summaryTimer);
+    state.multi.stats.summaryTimer = null;
+  }
+  updateMetrics();
+}
+
+function syncStatsToggle() {
+  const toggle = $("stats-toggle");
+  if (!toggle) return;
+  toggle.classList.toggle("is-off", !isStatsEnabled());
+  toggle.setAttribute("aria-pressed", String(isStatsEnabled()));
+  toggle.textContent = isStatsEnabled() ? "统计：开" : "统计：关";
+}
+
+async function refreshStatsAfterToggle() {
+  if (!isStatsEnabled()) return;
+  refreshDatabaseStats().catch(() => {});
+  if (state.mode === "realtime" || state.mode === "analysis") {
+    scheduleRealtimeSummary(0);
+  } else if (state.mode === "global") {
+    scheduleGlobalSummary(0);
+  } else if (state.mode === "multi") {
+    scheduleMultiSummary(0);
+    const windowValue = multiTimeWindowParams();
+    if (windowValue && state.multi.selectedShips.length) {
+      refreshSelectedMultiTrackPointStats(windowValue, state.multi.selectedShips.slice(0), state.multi.selectedStatsSeq)
+        .catch((error) => setStatus("多船统计刷新失败: " + error.message));
+    }
+  } else if (state.mode === "single") {
+    const windowValue = singleTrackWindowParams();
+    const shipId = $("ship-id")?.value.trim();
+    if (windowValue && shipId) {
+      refreshSingleTrackPointStats(windowValue, shipId, state.stats.singleStatsSeq)
+        .catch((error) => setStatus("单船统计刷新失败: " + error.message));
+    }
+  }
+}
+
+function setStatsEnabled(enabled) {
+  const next = Boolean(enabled);
+  if (state.stats.enabled === next) {
+    syncStatsToggle();
+    return;
+  }
+  state.stats.enabled = next;
+  saveStatsEnabled(next);
+  syncStatsToggle();
+  if (!next) {
+    abortStatsRequests();
+    clearStatsSummaryState();
+    setStatus("统计已关闭，当前页面不会请求统计接口");
+    return;
+  }
+  setStatus("统计已开启，正在刷新统计数据");
+  refreshStatsAfterToggle().catch((error) => setStatus("统计刷新失败: " + error.message));
 }
 
 function shouldTraceApi(url) {
@@ -286,7 +465,13 @@ function finishApiTrace(trace) {
 }
 
 async function requestJson(url, options = {}) {
-  const { trace, ...fetchOptions } = options;
+  const { trace, requestKey, ...fetchOptions } = options;
+  if (requestKey) {
+    apiRequestControllers.get(requestKey)?.abort();
+    const controller = new AbortController();
+    apiRequestControllers.set(requestKey, controller);
+    fetchOptions.signal = controller.signal;
+  }
   const startedAt = performance.now();
   let response;
   try {
@@ -306,14 +491,25 @@ async function requestJson(url, options = {}) {
     } catch {}
     throw new Error(message);
   }
-  return response.json();
+  const value = await response.json();
+  if (requestKey && apiRequestControllers.get(requestKey)?.signal === fetchOptions.signal) {
+    apiRequestControllers.delete(requestKey);
+  }
+  return value;
+}
+
+function abortApiRequest(requestKey) {
+  const controller = apiRequestControllers.get(requestKey);
+  if (!controller) return;
+  apiRequestControllers.delete(requestKey);
+  controller.abort();
 }
 
 async function getJson(url, options = {}) {
   return requestJson(url, { ...options, method: "GET" });
 }
 
-async function getCachedJson(url, ttlMs = STATS_CACHE_TTL_MS) {
+async function getCachedJson(url, ttlMs = STATS_CACHE_TTL_MS, options = {}) {
   const now = Date.now();
   const cached = statsRequestCache.get(url);
   if (cached?.value && cached.expiresAt > now) {
@@ -323,7 +519,7 @@ async function getCachedJson(url, ttlMs = STATS_CACHE_TTL_MS) {
     return cached.promise;
   }
   const entry = { expiresAt: now + ttlMs, value: null, promise: null };
-  entry.promise = getJson(url)
+  entry.promise = getJson(url, options)
     .then((value) => {
       entry.value = value;
       entry.expiresAt = Date.now() + ttlMs;
@@ -358,7 +554,8 @@ async function postJson(url, body, options = {}) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-    trace: options.trace
+    trace: options.trace,
+    requestKey: options.requestKey
   });
 }
 
@@ -410,6 +607,14 @@ function toMapCoordinate(point) {
   return ol.proj.fromLonLat(toMapPoint(point));
 }
 
+function deferAuxiliaryWork(callback, timeout = 900) {
+  if (typeof requestIdleCallback === "function") {
+    requestIdleCallback(callback, { timeout });
+    return;
+  }
+  setTimeout(callback, timeout);
+}
+
 function toQueryBBoxFromLngLat(sw, ne) {
   const qsw = state.config?.coordinateSystem === "wgs84" ? gcj02ToWgs84(sw[0], sw[1]) : sw;
   const qne = state.config?.coordinateSystem === "wgs84" ? gcj02ToWgs84(ne[0], ne[1]) : ne;
@@ -450,11 +655,67 @@ function toLocalDatetimeString(value) {
 }
 
 function pointTimeMillis(point) {
+  if (Number.isFinite(point?._timeMillis)) return point._timeMillis;
   const millis = new Date(String(point?.time || "").replace(" ", "T")).getTime();
   return Number.isFinite(millis) ? millis : 0;
 }
 
+function pointDistanceMeters(left, right) {
+  const lat1 = Number(left?.lat) * Math.PI / 180;
+  const lat2 = Number(right?.lat) * Math.PI / 180;
+  const dLat = lat2 - lat1;
+  const dLng = (Number(right?.lng) - Number(left?.lng)) * Math.PI / 180;
+  if (![lat1, lat2, dLat, dLng].every(Number.isFinite)) return Infinity;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+}
+
+function pointBearingDegrees(from, to) {
+  const lat1 = Number(from?.lat) * Math.PI / 180;
+  const lat2 = Number(to?.lat) * Math.PI / 180;
+  const dLng = (Number(to?.lng) - Number(from?.lng)) * Math.PI / 180;
+  if (![lat1, lat2, dLng].every(Number.isFinite)) return null;
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+  if (Math.abs(x) < 1e-12 && Math.abs(y) < 1e-12) return null;
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+function suppressSingleTrackJitter(points) {
+  const threshold = Math.max(0, Number($("single-jitter-meters")?.value || 0));
+  if (!threshold) return points;
+  const kept = [];
+  (points || []).forEach((point) => {
+    if (!kept.length || pointDistanceMeters(kept[kept.length - 1], point) >= threshold) {
+      kept.push(point);
+    }
+  });
+  return kept;
+}
+
+function assignPlaybackHeadings(points) {
+  groupByShip(points || []).forEach((shipPoints) => {
+    let lastHeading = null;
+    shipPoints.forEach((point, index) => {
+      let heading = null;
+      for (let cursor = index - 1; cursor >= 0 && heading == null; cursor -= 1) {
+        if (pointDistanceMeters(shipPoints[cursor], point) > 0.5) heading = pointBearingDegrees(shipPoints[cursor], point);
+      }
+      if (heading == null && index === 0) {
+        for (let cursor = 1; cursor < shipPoints.length && heading == null; cursor += 1) {
+          if (pointDistanceMeters(point, shipPoints[cursor]) > 0.5) heading = pointBearingDegrees(point, shipPoints[cursor]);
+        }
+      }
+      if (heading == null) heading = lastHeading ?? 0;
+      point.heading = heading;
+      lastHeading = heading;
+    });
+  });
+  return points;
+}
+
 function realtimeWindowParams() {
+  ensureRealtimeWindowDefaults();
   const point = $("realtime-point")?.value;
   const minutesValue = $("realtime-minutes")?.value;
   const minutes = Number(minutesValue || 10);
@@ -471,19 +732,41 @@ function realtimeWindowParams() {
 }
 
 function analysisWindowParams() {
-  const point = $("analysis-point")?.value;
-  const minutesValue = $("analysis-minutes")?.value;
-  const minutes = Number(minutesValue || 10);
-  if (point && Number.isFinite(minutes) && minutes > 0) {
-    return { timePoint: toIso(point), minutes };
-  }
-  if (state.realtimeWindow?.start && state.realtimeWindow?.end) {
-    const start = new Date(String(state.realtimeWindow.start).replace(" ", "T"));
-    const end = new Date(String(state.realtimeWindow.end).replace(" ", "T"));
-    const fallbackMinutes = Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000));
-    return { timePoint: toLocalDatetime(end), minutes: fallbackMinutes };
+  ensureAnalysisWindowDefaults();
+  const startValue = $("analysis-start")?.value;
+  const endValue = $("analysis-end")?.value;
+  const startDate = startValue ? new Date(startValue) : null;
+  const endDate = endValue ? new Date(endValue) : null;
+  if (startDate && endDate && Number.isFinite(startDate.getTime()) && Number.isFinite(endDate.getTime()) && startDate < endDate) {
+    return { start: toIso(startDate), end: toIso(endDate) };
   }
   return null;
+}
+
+function ensureRealtimeWindowDefaults() {
+  const point = $("realtime-point");
+  if (point && !point.value) {
+    point.value = DEFAULT_REALTIME_TIME;
+  }
+  const minutes = $("realtime-minutes");
+  if (minutes && !minutes.value) {
+    minutes.value = String(state.config?.defaultRealtimeWindowMinutes || 30);
+  }
+}
+
+function ensureAnalysisWindowDefaults() {
+  const start = $("analysis-start");
+  if (start && !start.value) start.value = DEFAULT_ANALYSIS_START_TIME;
+  const end = $("analysis-end");
+  if (end && !end.value) end.value = DEFAULT_ANALYSIS_END_TIME;
+  const step = $("analysis-step-minutes");
+  if (step && !step.value) step.value = String(DEFAULT_ANALYSIS_STEP_MINUTES);
+}
+
+function analysisStepMinutes() {
+  ensureAnalysisWindowDefaults();
+  const stepMinutes = Number($("analysis-step-minutes")?.value || DEFAULT_ANALYSIS_STEP_MINUTES);
+  return Number.isFinite(stepMinutes) && stepMinutes > 0 ? stepMinutes : null;
 }
 
 function ensureGlobalWindowDefaults() {
@@ -520,7 +803,9 @@ function normalizeBucketSeconds(value) {
   if (!Number.isFinite(number)) {
     return 60;
   }
-  return Math.max(1, Math.floor(number));
+  const requested = Math.max(1, Math.floor(number));
+  return [60, 300, 1800].reduce((closest, bucket) =>
+    Math.abs(bucket - requested) < Math.abs(closest - requested) ? bucket : closest, 60);
 }
 
 function syncSamplingControls() {
@@ -543,7 +828,7 @@ function syncSamplingControls() {
     bucketInput.disabled = mode !== "manual";
   }
   if (hint) {
-    hint.textContent = mode === "manual" ? "人工指定时直接按桶秒数抽稀，输入值会完全生效。" : "";
+    hint.textContent = mode === "manual" ? "人工指定时使用 ClickHouse 固定抽稀粒度。" : "";
   }
 }
 
@@ -553,16 +838,28 @@ function syncPlaybackPerformanceControls() {
   input.checked = Boolean(state.playback.performanceMode);
 }
 
+function syncGlobalWsControls() {
+  const input = $("global-ws-mode");
+  if (!input) return;
+  input.checked = Boolean(state.global.wsEnabled);
+}
+
+function syncGlobalTrackControls() {
+  const input = $("global-show-tracks");
+  if (!input) return;
+  input.checked = Boolean(state.global.showTracks);
+}
+
 function activeSamplingParams() {
   syncSamplingControls();
   return {
-    samplingMode: state.sampling.mode,
+    samplingMode: state.mode === "single" ? state.sampling.mode : state.sampling.mode === "raw" ? "auto" : state.sampling.mode,
     bucketSeconds: state.sampling.bucketSeconds
   };
 }
 
 function playbackPointLabel() {
-  return state.sampling.mode === "raw" ? "原始点" : "抽稀点";
+  return state.mode === "single" && state.sampling.mode === "raw" ? "原始点" : "抽稀点";
 }
 
 async function reloadActivePlaybackTrack() {
@@ -619,17 +916,23 @@ function syncRealtimeWindowInputs(windowValue) {
   $("realtime-minutes").value = String(Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000)));
 }
 
-function syncAnalysisWindowInputs(windowValue) {
-  if (!windowValue?.start || !windowValue?.end) return;
-  const start = new Date(String(windowValue.start).replace(" ", "T"));
-  const end = new Date(String(windowValue.end).replace(" ", "T"));
-  $("analysis-point").value = toLocalDatetime(end);
-  $("analysis-minutes").value = String(Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000)));
-}
-
 function realtimeWindowQuery() {
   const params = realtimeWindowParams();
   return params ? qs(params) : "";
+}
+
+function realtimeViewportQuery() {
+  const bbox = currentDataBBox();
+  if (!bbox) return "";
+  const windowValue = realtimeWindowParams();
+  const params = {
+    ...(windowValue || {}),
+    ...bbox,
+    zoom: getMapZoom()
+  };
+  const types = Array.from(selectedRealtimeTypeIds());
+  if (types.length) params.types = types.join(",");
+  return qs(params);
 }
 
 function sameWindow(a, b) {
@@ -669,9 +972,11 @@ function preparePlaybackRuntime() {
   state.trackPoints.forEach((point, globalIndex) => {
     point._playbackIndex = globalIndex;
     point._mapCoordinate = toMapCoordinate(point);
+    point._timeMillis = pointTimeMillis(point);
   });
   state.playback.groupedTracks = Array.from(groupByShip(state.trackPoints).entries()).map(([ship, points], index) => {
-    const color = TRACK_PALETTE[index % TRACK_PALETTE.length];
+    const palette = state.mode === "single" ? SINGLE_TRACK_PALETTE : TRACK_PALETTE;
+    const color = palette[index % palette.length];
     const lineFeature = new ol.Feature({
       geometry: new ol.geom.LineString([]),
       ship,
@@ -699,6 +1004,25 @@ function preparePlaybackRuntime() {
     return { ship, points, index, color };
   });
   state.playback.prepared = true;
+}
+
+function updateRuntimeMarker(runtime, activePoint) {
+  if (activePoint) {
+    runtime.markerFeature.setGeometry(new ol.geom.Point(activePoint._mapCoordinate));
+    runtime.markerFeature.set("point", activePoint);
+    runtime.markerFeature.setStyle(shipMarkerStyle(activePoint));
+    if (!runtime.markerAdded) {
+      state.layers.markerSource?.addFeature(runtime.markerFeature);
+      runtime.markerAdded = true;
+      state.layers.markers.push(runtime.markerFeature);
+    }
+    return;
+  }
+  if (runtime.markerAdded) {
+    state.layers.markerSource?.removeFeature(runtime.markerFeature);
+    runtime.markerAdded = false;
+    state.layers.markers = state.layers.markers.filter((feature) => feature !== runtime.markerFeature);
+  }
 }
 
 function findPlaybackCursor(points, playIndex) {
@@ -740,20 +1064,7 @@ function setPlaybackRuntimeCursor(runtime, cursor) {
     state.layers.playbackTrackSource?.removeFeature(runtime.lineFeature);
     runtime.lineAdded = false;
   }
-  if (activePoint) {
-    runtime.markerFeature.setGeometry(new ol.geom.Point(activePoint._mapCoordinate));
-    runtime.markerFeature.set("point", activePoint);
-    runtime.markerFeature.setStyle(shipMarkerStyle(activePoint));
-    if (!runtime.markerAdded) {
-      state.layers.markerSource?.addFeature(runtime.markerFeature);
-      runtime.markerAdded = true;
-      state.layers.markers.push(runtime.markerFeature);
-    }
-  } else if (runtime.markerAdded) {
-    state.layers.markerSource?.removeFeature(runtime.markerFeature);
-    runtime.markerAdded = false;
-    state.layers.markers = state.layers.markers.filter((feature) => feature !== runtime.markerFeature);
-  }
+  updateRuntimeMarker(runtime, activePoint);
 }
 
 function syncIncrementalPlaybackToIndex(playIndex) {
@@ -792,12 +1103,14 @@ function normalizeRealtimeItem(item) {
       speed: item[4],
       heading: item[5],
       time: item[6],
-      isAis: Number(item[7] || 0)
+      isAis: Number(item[7] || 0),
+      shipType: Number(item[8] || 0)
     };
   }
   const lng = Number(item.lng);
   const lat = Number(item.lat);
   const [mapLng, mapLat] = toMapPoint({ lng, lat });
+  const mapCoordinate = ol.proj.fromLonLat([mapLng, mapLat]);
   return {
     shipId: String(item.shipId || ""),
     shipName: item.shipName || item.shipId || "",
@@ -805,10 +1118,12 @@ function normalizeRealtimeItem(item) {
     lat,
     mapLng,
     mapLat,
+    mapCoordinate,
     speed: Number(item.speed || 0),
     heading: Number(item.heading || 0),
     time: item.time || "",
-    isAis: Number(item.isAis || 0)
+    isAis: Number(item.isAis || 0),
+    shipType: Number(item.shipType || 0)
   };
 }
 
@@ -900,10 +1215,11 @@ function upsertRealtimeItems(items) {
 function queryVisibleShipIndices() {
   const bbox = currentDataBBox();
   const store = state.realtimeStore;
+  const selectedTypes = selectedRealtimeTypeIds();
   if (!bbox || !store.grid.size) {
     const indices = [];
     for (let index = 0; index < store.items.length; index += 1) {
-      if (matchesRealtimeType(store.items[index])) indices.push(index);
+      if (matchesRealtimeType(store.items[index], selectedTypes)) indices.push(index);
     }
     return indices;
   }
@@ -920,7 +1236,7 @@ function queryVisibleShipIndices() {
       for (const index of bucket) {
         const item = store.items[index];
         if (
-          matchesRealtimeType(item) &&
+          matchesRealtimeType(item, selectedTypes) &&
           item.lng >= bbox.west &&
           item.lng <= bbox.east &&
           item.lat >= bbox.south &&
@@ -938,7 +1254,7 @@ function scheduleRealtimeRender(delay = 120) {
   if (state.layers.realtimeRenderTimer) clearTimeout(state.layers.realtimeRenderTimer);
   state.layers.realtimeRenderTimer = setTimeout(() => {
     state.layers.realtimeRenderTimer = null;
-    if (state.mode === "realtime" && state.latest.length) renderRealtime();
+    if (state.mode === "realtime") loadLatest().catch((error) => showError(error.message));
   }, delay);
 }
 
@@ -987,8 +1303,70 @@ function normalizeRealtimeItems(data) {
     speed: row[4],
     heading: row[5],
     time: row[6],
-    isAis: Number(row[7] || 0)
+    isAis: Number(row[7] || 0),
+    shipType: Number(row[8] || 0)
   }));
+}
+
+function normalizeAggregateItems(data) {
+  const fields = data.fields || [];
+  if (!data.compact || !fields.length) return data.items || [];
+  return (data.items || []).map((row) => Object.fromEntries(fields.map((field, index) => [field, row[index]])));
+}
+
+function removeRuntimeLine(runtime) {
+  if (!runtime.lineAdded) return;
+  state.layers.playbackTrackSource?.removeFeature(runtime.lineFeature);
+  runtime.lineAdded = false;
+}
+
+function setPositionRuntimeCursor(runtime, cursor) {
+  if (!runtime || runtime.cursor === cursor) return;
+  runtime.cursor = cursor;
+  removeRuntimeLine(runtime);
+  updateRuntimeMarker(runtime, cursor >= 0 ? runtime.points[cursor] : null);
+}
+
+function syncPositionPlaybackToIndex(playIndex) {
+  if (!state.playback.prepared) preparePlaybackRuntime();
+  state.playback.groupedTracks.forEach(({ ship, points }) => {
+    setPositionRuntimeCursor(state.playback.shipRuntime.get(ship), findPlaybackCursor(points, playIndex));
+  });
+}
+
+function advancePositionPlayback(previousIndex, nextIndex) {
+  if (!state.playback.prepared || nextIndex < previousIndex) {
+    syncPositionPlaybackToIndex(nextIndex);
+    return;
+  }
+  for (let index = previousIndex + 1; index <= nextIndex; index += 1) {
+    const point = state.trackPoints[index];
+    const runtime = state.playback.shipRuntime.get(point?.shipId);
+    if (!runtime) continue;
+    setPositionRuntimeCursor(runtime, runtime.cursor + 1);
+  }
+}
+
+function findPlaybackWindowStart(points, endCursor, startTime) {
+  let low = 0;
+  let high = Math.max(-1, endCursor);
+  let first = endCursor + 1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    if (pointTimeMillis(points[mid]) >= startTime) {
+      first = mid;
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+  return first;
+}
+
+function normalizeTrackItems(data) {
+  if (!data?.compact) return data?.items || [];
+  const fields = data.fields || [];
+  return (data.items || []).map((row) => Object.fromEntries(fields.map((field, index) => [field, row[index]])));
 }
 
 function escapeHtml(value) {
@@ -1000,16 +1378,55 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-function realtimeTypeFilter() {
-  return $("realtime-type")?.value || "ais";
+function shipTypeInfo(value, isAis = 1) {
+  const normalized = Number(value || 0);
+  return SHIP_TYPE_BY_VALUE.get(normalized) || SHIP_TYPE_BY_VALUE.get(Number(isAis) === 1 ? 1 : 2);
 }
 
-function matchesRealtimeType(item) {
-  const type = realtimeTypeFilter();
-  if (type === "all") return true;
-  if (type === "ais") return Number(item.isAis) === 1;
-  if (type === "nonais") return Number(item.isAis) === 0;
-  return true;
+function shipTypeLabel(value, isAis) {
+  return shipTypeInfo(value, isAis).label;
+}
+
+function selectedRealtimeTypeIds() {
+  return new Set(Array.from(document.querySelectorAll("[data-realtime-type]:checked")).map((input) => input.dataset.realtimeType));
+}
+
+function matchesRealtimeType(item, selectedTypes = selectedRealtimeTypeIds()) {
+  return selectedTypes.has(shipTypeInfo(item?.shipType, item?.isAis).id);
+}
+
+function selectedGlobalTypeIds() {
+  return new Set(Array.from(document.querySelectorAll("[data-global-type]:checked")).map((input) => input.dataset.globalType));
+}
+
+function matchesGlobalType(item, selectedTypes = selectedGlobalTypeIds()) {
+  return selectedTypes.has(shipTypeInfo(item?.shipType, item?.isAis).id);
+}
+
+function filteredGlobalTrackPoints() {
+  const selectedTypes = selectedGlobalTypeIds();
+  return (state.global.allTrackPoints || []).filter((point) => matchesGlobalType(point, selectedTypes));
+}
+
+function applyGlobalTrackFilter({ resetPlayIndex = true } = {}) {
+  if (state.mode !== "global") return;
+  pausePlayback();
+  state.trackPoints = filteredGlobalTrackPoints();
+  if (resetPlayIndex) {
+    state.playIndex = 0;
+  } else {
+    state.playIndex = Math.min(state.playIndex, Math.max(0, state.trackPoints.length - 1));
+  }
+  state.global.stats.sampledTrackPoints = state.trackPoints.length;
+  renderTracks();
+  updateMetrics();
+  syncPlayButtons();
+  setStatus(`全域前端过滤后展示 ${state.trackPoints.length.toLocaleString()} / ${(state.global.allTrackPoints || []).length.toLocaleString()} 个${playbackPointLabel()}`);
+}
+
+function setGlobalTrackPoints(points) {
+  state.global.allTrackPoints = points || [];
+  state.trackPoints = filteredGlobalTrackPoints();
 }
 
 function metricNumber(value) {
@@ -1071,6 +1488,19 @@ function updateMetrics() {
   $("active-time").textContent = state.trackPoints[state.playIndex]?.time || "--";
 }
 
+function closeGlobalReplaySocket() {
+  const socket = state.global.ws.socket;
+  state.global.ws.seq += 1;
+  state.global.ws.socket = null;
+  state.global.ws.closing = true;
+  if (socket && socket.readyState !== WebSocket.CLOSED && socket.readyState !== WebSocket.CLOSING) {
+    socket.close();
+  }
+  finishApiTrace(state.global.ws.trace);
+  state.global.ws.trace = null;
+  state.global.ws.closing = false;
+}
+
 function activeStatsWindow() {
   if (state.mode === "realtime") {
     return realtimeWindowParams();
@@ -1088,6 +1518,7 @@ function activeStatsWindow() {
 }
 
 async function refreshRealtimeSummary() {
+  if (!isStatsEnabled()) return;
   const windowValue = activeStatsWindow();
   if (!windowValue) return;
   const analysisMode = state.mode === "analysis";
@@ -1096,7 +1527,10 @@ async function refreshRealtimeSummary() {
   if (summaryKey === state.stats.summaryWindowKey) return;
   const seq = ++state.stats.summarySeq;
   const params = qs({ ...windowValue, zoom: getMapZoom(), ...(bbox || {}) });
-  const data = await getCachedJson(`/api/stats/realtime-summary?${params}`, SUMMARY_CACHE_TTL_MS);
+  const data = await getCachedJson(`/api/stats/realtime-summary?${params}`, SUMMARY_CACHE_TTL_MS, {
+    requestKey: "stats-realtime-summary"
+  });
+  if (!isStatsEnabled()) return;
   if (seq !== state.stats.summarySeq) return;
   state.stats.summaryWindowKey = summaryKey;
   state.stats.windowTrackPoints = Number(data.windowTrackPoints || 0);
@@ -1109,6 +1543,7 @@ async function refreshRealtimeSummary() {
 }
 
 function scheduleRealtimeSummary(delay = 260) {
+  if (!isStatsEnabled()) return;
   if (state.stats.summaryTimer) clearTimeout(state.stats.summaryTimer);
   state.stats.summaryTimer = setTimeout(() => {
     state.stats.summaryTimer = null;
@@ -1117,39 +1552,51 @@ function scheduleRealtimeSummary(delay = 260) {
 }
 
 async function refreshDatabaseStats() {
-  const data = await getCachedJson("/api/stats/database", STATS_CACHE_TTL_MS);
+  if (!isStatsEnabled()) return;
+  const data = await getCachedJson("/api/stats/database", STATS_CACHE_TTL_MS, {
+    requestKey: "stats-database"
+  });
+  if (!isStatsEnabled()) return;
   applyDatabaseStats(data.databaseTrackPoints ?? data.trackPoints ?? 0, data.databaseShips ?? data.ships ?? 0);
   updateMetrics();
 }
 
 async function refreshSingleTrackPointStats(windowValue, shipId, seq) {
+  if (!isStatsEnabled()) return;
   if (!windowValue || !shipId) return;
   const params = qs({ shipId, ...windowValue });
-  const data = await getJson(`/api/stats/single-track-points?${params}`);
+  const data = await getJson(`/api/stats/single-track-points?${params}`, { requestKey: "stats-single-track-points" });
+  if (!isStatsEnabled()) return;
   if (seq !== state.stats.singleStatsSeq) return;
   state.stats.singleRawTrackPoints = Number(data.trackPoints || 0);
   updateMetrics();
 }
 
 async function refreshSelectedMultiTrackPointStats(windowValue, shipIds, seq) {
+  if (!isStatsEnabled()) return;
   if (!windowValue || !shipIds.length) return;
   const data = await postJson("/api/stats/multi-track-points", {
     shipIds,
     start: windowValue.start,
     end: windowValue.end
-  });
+  }, { requestKey: "stats-multi-track-points" });
+  if (!isStatsEnabled()) return;
   if (seq !== state.multi.selectedStatsSeq) return;
   state.multi.selectedRawTrackPoints = Number(data.trackPoints || 0);
   updateMetrics();
 }
 
 async function refreshGlobalSummary() {
+  if (!isStatsEnabled()) return;
   const windowValue = globalWindowParams();
   if (!windowValue) return;
   const summaryKey = JSON.stringify({ windowValue });
   if (summaryKey === state.global.stats.summaryWindowKey) return;
   const seq = ++state.global.stats.summarySeq;
-  const data = await getCachedJson(`/api/stats/global-summary?${qs(windowValue)}`, SUMMARY_CACHE_TTL_MS);
+  const data = await getCachedJson(`/api/stats/global-summary?${qs(windowValue)}`, SUMMARY_CACHE_TTL_MS, {
+    requestKey: "stats-global-summary"
+  });
+  if (!isStatsEnabled()) return;
   if (seq !== state.global.stats.summarySeq) return;
   state.global.stats.summaryWindowKey = summaryKey;
   state.global.stats.windowTrackPoints = Number(data.windowTrackPoints || 0);
@@ -1157,6 +1604,7 @@ async function refreshGlobalSummary() {
 }
 
 function scheduleGlobalSummary(delay = 260) {
+  if (!isStatsEnabled()) return;
   if (state.global.stats.summaryTimer) clearTimeout(state.global.stats.summaryTimer);
   state.global.stats.summaryTimer = setTimeout(() => {
     state.global.stats.summaryTimer = null;
@@ -1165,6 +1613,7 @@ function scheduleGlobalSummary(delay = 260) {
 }
 
 async function refreshMultiSummary() {
+  if (!isStatsEnabled()) return;
   const start = $("start")?.value;
   const end = $("end")?.value;
   if (!start || !end) {
@@ -1192,8 +1641,11 @@ async function refreshMultiSummary() {
     end: toIso(end),
     ...(bbox || {})
   });
-  const promise = getCachedJson(`/api/stats/multi-summary?${params}`, SUMMARY_CACHE_TTL_MS)
+  const promise = getCachedJson(`/api/stats/multi-summary?${params}`, SUMMARY_CACHE_TTL_MS, {
+    requestKey: "stats-multi-summary"
+  })
     .then((data) => {
+      if (!isStatsEnabled()) return;
       if (seq !== state.multi.stats.summarySeq) return;
       state.multi.stats.summaryWindowKey = summaryKey;
       state.multi.stats.windowTrackPoints = Number(data.windowTrackPoints || 0);
@@ -1214,6 +1666,7 @@ async function refreshMultiSummary() {
 }
 
 function scheduleMultiSummary(delay = 260) {
+  if (!isStatsEnabled()) return;
   if (state.multi.stats.summaryTimer) clearTimeout(state.multi.stats.summaryTimer);
   state.multi.stats.summaryTimer = setTimeout(() => {
     state.multi.stats.summaryTimer = null;
@@ -1222,9 +1675,12 @@ function scheduleMultiSummary(delay = 260) {
 }
 
 function resetTrackPlaybackState() {
+  closeGlobalReplaySocket();
   state.playing = false;
+  stopPlaybackTimer();
   state.playIndex = 0;
   state.trackPoints = [];
+  state.global.allTrackPoints = [];
   resetPlaybackRuntime();
   state.stats.singleStatsSeq += 1;
   state.stats.singleRawTrackPoints = 0;
@@ -1259,6 +1715,7 @@ function syncPlayButtons() {
 
 function pausePlayback() {
   state.playing = false;
+  stopPlaybackTimer();
   syncPlayButtons();
 }
 
@@ -1271,6 +1728,7 @@ function startPlayback() {
   state.playing = true;
   syncPlayButtons();
   renderPlaybackMarkers();
+  schedulePlayerTick();
 }
 
 function togglePlayback() {
@@ -1300,6 +1758,9 @@ function switchMode(mode) {
   if (previousMode !== mode) {
     resetTrackPlaybackState();
   }
+  if (previousMode === "analysis" && mode !== "analysis") {
+    stopDensityEvolution();
+  }
   document.querySelectorAll(".nav").forEach((button) => button.classList.toggle("active", button.dataset.mode === mode));
   document.querySelectorAll(".mode-panel").forEach((panel) => panel.classList.add("hidden"));
   $("realtime-stats-section")?.classList.toggle("hidden", mode !== "realtime");
@@ -1313,6 +1774,10 @@ function switchMode(mode) {
   if (isPlaybackMode()) {
     syncSamplingControls();
   }
+  if (mode === "global") {
+    syncGlobalWsControls();
+    syncGlobalTrackControls();
+  }
   $("panel-title").textContent = {
     realtime: "实时位置展示",
     analysis: "历史态势分析",
@@ -1321,7 +1786,7 @@ function switchMode(mode) {
     global: "全域轨迹回放"
   }[mode];
   clearLayers();
-  if (mode === "realtime") renderRealtime();
+  if (mode === "realtime") loadLatest().catch((error) => showError(error.message));
   if (mode === "analysis") renderHeat();
   if (isPlaybackMode()) renderTracks();
   renderCandidateDrawer();
@@ -1345,13 +1810,21 @@ function clearLayers() {
     clearTimeout(state.layers.lineTimer);
     state.layers.lineTimer = null;
   }
-  if (state.layers.heat) {
+  if (state.layers.heat && state.mode !== "analysis") {
+    stopDensityEvolution();
     state.map.removeLayer(state.layers.heat);
     state.layers.heat = null;
+  }
+  if (state.mode !== "realtime" && state.realtimeHeat.timer) {
+    clearTimeout(state.realtimeHeat.timer);
+    state.realtimeHeat.timer = null;
+    state.realtimeHeat.seq += 1;
   }
   state.layers.trackSource?.clear();
   state.layers.playbackTrackSource?.clear();
   state.layers.markerSource?.clear();
+  state.layers.endpointSource?.clear();
+  state.layers.hoverTrackShip = null;
   if (!isPlaybackMode()) resetPlaybackRuntime();
   if (state.mode !== "multi") state.layers.rectangleSource?.clear();
   if (state.mode !== "realtime") {
@@ -1415,13 +1888,23 @@ function clearRealtimeCanvas() {
 }
 
 function canvasShipColor(item) {
-  if (Number(item.isAis) === 0) return "#22c55e";
-  return AIS_SHIP_FILL;
+  return shipTypeInfo(item?.shipType, item?.isAis).color;
 }
 
-function drawRadarCircle(ctx, x, y, color) {
+function drawRadarCircle(ctx, x, y, color, filled = false) {
   const radius = 5.5;
   ctx.save();
+
+  if (!filled) {
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
   ctx.beginPath();
   ctx.shadowColor = "rgba(15, 23, 42, 0.22)";
   ctx.shadowBlur = 4;
@@ -1433,10 +1916,10 @@ function drawRadarCircle(ctx, x, y, color) {
   ctx.shadowColor = "transparent";
   ctx.beginPath();
   ctx.arc(x, y, radius, 0, Math.PI * 2);
-  ctx.fillStyle = color;
+  ctx.fillStyle = filled ? color : "rgba(255,255,255,0.96)";
   ctx.fill();
-  ctx.strokeStyle = "rgba(15,23,42,0.35)";
-  ctx.lineWidth = 0.8;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = filled ? 0.8 : 1.8;
   ctx.stroke();
   ctx.restore();
 }
@@ -1452,7 +1935,7 @@ function drawAisShipShape(ctx, scale = 1) {
   ctx.closePath();
 }
 
-function drawShipTriangle(ctx, x, y, heading, color) {
+function drawShipTriangle(ctx, x, y, heading, color, filled = true) {
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(((Number(heading) || 0) * Math.PI) / 180);
@@ -1466,16 +1949,16 @@ function drawShipTriangle(ctx, x, y, heading, color) {
 
   ctx.shadowColor = "transparent";
   drawAisShipShape(ctx, 1);
-  ctx.fillStyle = color;
+  ctx.fillStyle = filled ? color : "rgba(255,255,255,0.96)";
   ctx.fill();
-  ctx.strokeStyle = AIS_SHIP_STROKE;
-  ctx.lineWidth = AIS_SHIP_STROKE_WIDTH;
+  ctx.strokeStyle = filled ? AIS_SHIP_STROKE : color;
+  ctx.lineWidth = filled ? AIS_SHIP_STROKE_WIDTH : 1.6;
   ctx.stroke();
   ctx.restore();
 }
 
-function aisShipIconCanvas(color = AIS_SHIP_FILL) {
-  const key = color;
+function aisShipIconCanvas(typeInfo = SHIP_TYPE_BY_VALUE.get(1)) {
+  const key = `${typeInfo.id}:${typeInfo.color}:${typeInfo.filled}`;
   if (AIS_SHIP_ICON_CACHE.has(key)) return AIS_SHIP_ICON_CACHE.get(key);
   const ratio = window.devicePixelRatio || 1;
   const padding = 4;
@@ -1489,26 +1972,37 @@ function aisShipIconCanvas(color = AIS_SHIP_FILL) {
   const ctx = canvas.getContext("2d");
   ctx.scale(ratio, ratio);
   ctx.translate(width / 2, height / 2);
-  drawAisShipShape(ctx, 1);
-  ctx.fillStyle = color;
-  ctx.fill();
-  ctx.strokeStyle = AIS_SHIP_STROKE;
-  ctx.lineWidth = AIS_SHIP_STROKE_WIDTH;
-  ctx.stroke();
+  if (typeInfo.shape === "circle") {
+    ctx.translate(-width / 2, -height / 2);
+    drawRadarCircle(ctx, width / 2, height / 2, typeInfo.color, typeInfo.filled);
+  } else {
+    drawAisShipShape(ctx, 1);
+    ctx.fillStyle = typeInfo.filled ? typeInfo.color : "rgba(255,255,255,0.96)";
+    ctx.fill();
+    ctx.strokeStyle = typeInfo.filled ? AIS_SHIP_STROKE : typeInfo.color;
+    ctx.lineWidth = typeInfo.filled ? AIS_SHIP_STROKE_WIDTH : 1.6;
+    ctx.stroke();
+  }
   AIS_SHIP_ICON_CACHE.set(key, canvas);
   return canvas;
 }
 
 function shipMarkerStyle(point) {
-  return new ol.style.Style({
+  const heading = Math.round(((Number(point?.heading) || 0) % 360 + 360) % 360);
+  const type = shipTypeInfo(point?.shipType, point?.isAis);
+  const key = `${type.id}:${heading}`;
+  if (SHIP_MARKER_STYLE_CACHE.has(key)) return SHIP_MARKER_STYLE_CACHE.get(key);
+  const style = new ol.style.Style({
     image: new ol.style.Icon({
-      img: aisShipIconCanvas(AIS_SHIP_FILL),
+      img: aisShipIconCanvas(type),
       imgSize: [AIS_SHIP_ICON_WIDTH + 8, AIS_SHIP_ICON_HEIGHT + 8],
-      rotation: ((Number(point?.heading) || 0) * Math.PI) / 180,
+      rotation: type.shape === "circle" ? 0 : (heading * Math.PI) / 180,
       rotateWithView: true,
       anchor: [0.5, 0.5]
     })
   });
+  SHIP_MARKER_STYLE_CACHE.set(key, style);
+  return style;
 }
 
 function lineAndRectangleStyle(color, width, fillOpacity = 0) {
@@ -1519,7 +2013,7 @@ function lineAndRectangleStyle(color, width, fillOpacity = 0) {
 }
 
 function pixelFromShip(item) {
-  const pixel = state.map.getPixelFromCoordinate(ol.proj.fromLonLat([item.mapLng, item.mapLat]));
+  const pixel = state.map.getPixelFromCoordinate(item.mapCoordinate);
   return pixel ? { x: pixel[0], y: pixel[1] } : null;
 }
 
@@ -1557,8 +2051,9 @@ function renderRealtimeCanvas(indices) {
       const pixel = pixelFromShip(item);
       if (!pixel) continue;
       if (pixel.x < -20 || pixel.x > width + 20 || pixel.y < -20 || pixel.y > height + 20) continue;
-      if (Number(item.isAis) === 0) drawRadarCircle(ctx, pixel.x, pixel.y, canvasShipColor(item));
-      else drawShipTriangle(ctx, pixel.x, pixel.y, item.heading, canvasShipColor(item));
+      const type = shipTypeInfo(item.shipType, item.isAis);
+      if (type.shape === "circle") drawRadarCircle(ctx, pixel.x, pixel.y, type.color, type.filled);
+      else drawShipTriangle(ctx, pixel.x, pixel.y, item.heading, type.color, type.filled);
       addRealtimeHit({ x: pixel.x, y: pixel.y, index: indices[cursor - 1] });
       drawn += 1;
       if (drawn >= REALTIME_DRAW_BATCH || performance.now() - startedAt >= REALTIME_DRAW_BUDGET_MS) break;
@@ -1576,6 +2071,21 @@ function renderRealtimeCanvas(indices) {
 function renderRealtime() {
   if (!state.map || state.mode !== "realtime") return;
   const startedAt = performance.now();
+  if (state.realtimeViewportMode === "aggregate" || state.realtimeViewportMode === "heat") {
+    clearRealtimeCanvas();
+    state.stats.viewportShips = 0;
+    if (state.realtimeViewportMode === "aggregate") {
+      renderHeatSource(state.realtimeHeat.items.map((item) => densityFeature(item, densityWeightCap(state.realtimeHeat.items), 0, 1)));
+      state.stats.viewportShips = Number(state.realtimeHeat.total || 0);
+    } else {
+      renderHeatSource([]);
+    }
+    renderSelectedRealtimeShips();
+    updateMetrics();
+    setStatus(`低缩放聚合模式，当前视野 ${state.stats.viewportShips.toLocaleString()} 艘，已选 ${state.realtimeSelection.size.toLocaleString()} 艘`);
+    return;
+  }
+  clearRealtimeHeat();
   const indices = queryVisibleShipIndices();
   state.stats.viewportShips = indices.length;
   try {
@@ -1588,6 +2098,7 @@ function renderRealtime() {
   const elapsed = Math.round(performance.now() - startedAt);
   updateMetrics();
   setStatus(`内存缓存 ${state.latest.length.toLocaleString()} 艘，当前视野 ${indices.length.toLocaleString()} 艘，耗时 ${elapsed} ms`);
+  renderSelectedRealtimeShips();
 }
 
 function normalizeShipInfoData(data) {
@@ -1598,6 +2109,7 @@ function normalizeShipInfoData(data) {
     heading: data.heading,
     time: data.time,
     isAis: data.isAis,
+    shipType: data.shipType,
     lnglat: data.lnglat || [data.mapLng, data.mapLat]
   };
 }
@@ -1629,6 +2141,7 @@ function hitTestShip(pixel) {
 }
 
 function handleRealtimePointerMove(event) {
+  updateTrackExtensionHover(event);
   if (state.mode !== "realtime") return;
   if (state.layers.realtimeConfirmShipId) return;
   const ship = hitTestShip(event.pixel);
@@ -1637,11 +2150,7 @@ function handleRealtimePointerMove(event) {
 }
 
 function handleRealtimeClick(event) {
-  if (state.mode !== "realtime") return;
-  const ship = hitTestShip(event.pixel);
-  if (ship) {
-    selectRealtimeShip(ship.shipId, ship.shipName || ship.shipId, ship.time);
-  }
+  if (handleTrackExtensionClick(event)) return;
 }
 
 function handleRealtimeDomClick(event) {
@@ -1657,7 +2166,73 @@ function handleRealtimeDomClick(event) {
   if (!ship) return;
   event.preventDefault();
   event.stopPropagation();
-  selectRealtimeShip(ship.shipId, ship.shipName || ship.shipId, ship.time);
+  toggleRealtimeShipSelection(ship);
+}
+
+function toggleRealtimeShipSelection(ship) {
+  const data = normalizeShipInfoData(ship);
+  if (!data.id) return;
+  if (state.realtimeSelection.has(data.id)) {
+    state.realtimeSelection.delete(data.id);
+  } else {
+    state.realtimeSelection.set(data.id, normalizeRealtimeItem({ ...ship, shipId: data.id, shipName: data.name }));
+  }
+  renderSelectedRealtimeShips();
+  showRealtimeShipConfirm({ ...ship, shipId: data.id, shipName: data.name });
+  updateRealtimeSelectionControls();
+}
+
+function clearRealtimeSelection() {
+  state.realtimeSelection.clear();
+  renderSelectedRealtimeShips();
+  updateRealtimeSelectionControls();
+}
+
+function updateRealtimeSelectionControls() {
+  const count = $("realtime-selected-count");
+  if (count) count.textContent = String(state.realtimeSelection.size);
+  const play = $("realtime-multi-play");
+  if (play) play.disabled = state.realtimeSelection.size === 0;
+}
+
+function renderSelectedRealtimeShips() {
+  if (state.mode !== "realtime" || !state.layers.markerSource) return;
+  state.layers.markerSource.clear();
+  state.layers.markers = [];
+  state.realtimeSelection.forEach((item) => {
+    const marker = new ol.Feature({
+      geometry: new ol.geom.Point(item.mapCoordinate || toMapCoordinate(item)),
+      point: item,
+      selectedRealtime: true
+    });
+    marker.setStyle(shipMarkerStyle(item));
+    state.layers.markerSource.addFeature(marker);
+    state.layers.markers.push(marker);
+  });
+}
+
+function useRealtimeSelectionForMultiTrack() {
+  const ships = Array.from(state.realtimeSelection.values());
+  if (!ships.length) return;
+  const selected = ships.slice(0, multiSelectionLimit());
+  state.multi.bbox = null;
+  state.layers.rectangleSource?.clear();
+  state.multi.selectedShips = selected.map((ship) => ship.shipId);
+  state.multi.candidatePages = [{
+    page: 1,
+    items: selected.map((ship) => ({
+      shipId: ship.shipId,
+      shipName: ship.shipName,
+      shipType: shipTypeInfo(ship.shipType, ship.isAis).value,
+      isAis: ship.isAis,
+      points: 0
+    }))
+  }];
+  state.multi.candidateCurrentPage = 1;
+  state.multi.drawerVisible = true;
+  switchMode("multi");
+  renderCandidateDrawer();
+  loadMultiTrack().catch((error) => showError(error.message));
 }
 
 function showShipInfo(data) {
@@ -1665,7 +2240,7 @@ function showShipInfo(data) {
   data = normalizeShipInfoData(data);
   if (state.layers.hoverShipId === data.id) return;
   state.layers.hoverShipId = data.id;
-  const typeText = Number(data.isAis) === 1 ? "AIS" : "Radar";
+  const typeText = shipTypeLabel(data.shipType, data.isAis);
   const content = `
     <div class="ship-info">
       <strong>${escapeHtml(data.name || data.id)}</strong>
@@ -1690,7 +2265,7 @@ function showShipInfo(data) {
       node.onclick = (event) => {
         event.preventDefault();
         event.stopPropagation();
-        selectRealtimeShip(data.id, data.name || data.id, data.time);
+        previewRealtimeShip(data).catch((error) => showError(error.message));
       };
     });
   }, 0);
@@ -1704,8 +2279,13 @@ function hideShipInfo() {
 }
 
 function clearRealtimeShipConfirm() {
+  state.layers.realtimePreviewSeq += 1;
   state.layers.realtimeConfirmShipId = "";
   state.layers.hoverShipId = "";
+  if (state.mode === "realtime") {
+    state.layers.trackSource?.clear();
+    state.layers.lines = [];
+  }
   const card = $("ship-hover-card");
   card?.classList.remove("confirm");
   card?.classList.add("hidden");
@@ -1716,7 +2296,7 @@ function showRealtimeShipConfirm(data) {
   data = normalizeShipInfoData(data);
   state.layers.hoverShipId = data.id;
   state.layers.realtimeConfirmShipId = data.id;
-  const typeText = Number(data.isAis) === 1 ? "AIS" : "Radar";
+  const typeText = shipTypeLabel(data.shipType, data.isAis);
   const card = $("ship-hover-card");
   card.innerHTML = `
     <div class="ship-info">
@@ -1727,7 +2307,7 @@ function showRealtimeShipConfirm(data) {
       <div>航向：${escapeHtml(data.heading ?? "--")}</div>
       <div>时间：${escapeHtml(data.time || "--")}</div>
       <div class="ship-info-actions">
-        <button type="button" id="confirm-single-track" class="primary">确认接入单船轨迹</button>
+        <button type="button" id="confirm-single-track" class="primary">单船回放</button>
         <button type="button" id="cancel-single-track">取消</button>
       </div>
     </div>
@@ -1756,7 +2336,7 @@ function showRealtimeShipConfirm(data) {
     event.stopPropagation();
     clearRealtimeShipConfirm();
   };
-  setStatus(`已选中 ${data.name || data.id}，确认后查询单船轨迹`);
+  setStatus(`已选中 ${data.name || data.id}`);
 }
 
 async function selectRealtimeShip(shipId, shipName, shipTime) {
@@ -1778,18 +2358,126 @@ async function selectRealtimeShip(shipId, shipName, shipTime) {
   }
 }
 
-function renderHeat() {
-  if (!state.map || state.mode !== "analysis") return;
-  if (state.layers.heat) state.map.removeLayer(state.layers.heat);
-  const max = Math.max(1, ...state.density.map((item) => Number(item.count)));
-  const source = new ol.source.Vector({
-    features: state.density.map((item) => {
-      const feature = new ol.Feature({ geometry: new ol.geom.Point(toMapCoordinate(item)) });
-      feature.set("weight", Math.max(0.05, Math.min(1, Number(item.count) / max)));
-      return feature;
-    })
+function realtimeShipPreviewWindow(shipTime) {
+  const fallbackEnd = state.realtimeWindow?.end || $("realtime-point")?.value || "";
+  const rawEnd = shipTime || fallbackEnd;
+  const end = new Date(String(rawEnd).replace(" ", "T"));
+  if (!Number.isFinite(end.getTime())) return null;
+  const start = new Date(end.getTime() - 60 * 60 * 1000);
+  return { start: toIso(start), end: toIso(end) };
+}
+
+function renderRealtimeShipPreview(points) {
+  if (!state.map || state.mode !== "realtime") return;
+  state.layers.trackSource?.clear();
+  state.layers.lines = [];
+  const path = (points || []).map((point) => toMapCoordinate(point));
+  if (path.length < 2) return;
+  const line = new ol.Feature({
+    geometry: new ol.geom.LineString(path),
+    points: path.length
   });
-  const heat = new ol.layer.Heatmap({
+  line.setStyle(new ol.style.Style({
+    stroke: new ol.style.Stroke({
+      color: REALTIME_PREVIEW_TRACK_COLOR,
+      width: 4,
+      lineJoin: "round",
+      lineCap: "round"
+    })
+  }));
+  state.layers.trackSource?.addFeature(line);
+  state.layers.lines.push(line);
+}
+
+async function previewRealtimeShip(ship) {
+  if (!ship || state.mode !== "realtime") return;
+  const data = normalizeShipInfoData(ship);
+  if (!data.id) return;
+  showRealtimeShipConfirm(data);
+  const windowValue = realtimeShipPreviewWindow(data.time);
+  if (!windowValue) {
+    setStatus("实时船舶时间无效，无法加载轨迹预览");
+    return;
+  }
+  const seq = ++state.layers.realtimePreviewSeq;
+  state.layers.trackSource?.clear();
+  const params = qs({
+    shipId: data.id,
+    ...windowValue,
+    zoom: getMapZoom(),
+    samplingMode: "auto"
+  });
+  const trace = beginApiTrace("实时船一小时轨迹");
+  try {
+    const preview = await getJson(`/api/tracks/single?${params}`, { trace, requestKey: "realtime-preview-track" });
+    if (seq !== state.layers.realtimePreviewSeq || state.mode !== "realtime" || state.layers.realtimeConfirmShipId !== data.id) return;
+    const points = normalizeTrackItems(preview);
+    renderRealtimeShipPreview(points);
+    setStatus(`已绘制 ${data.name || data.id} 一小时轨迹预览，${points.length.toLocaleString()} 个抽稀点`);
+  } finally {
+    finishApiTrace(trace);
+  }
+}
+
+function densityWeightCap(items) {
+  const counts = (items || [])
+    .map((item) => Number(item.count || 0))
+    .filter((count) => Number.isFinite(count) && count > 0)
+    .sort((left, right) => left - right);
+  if (!counts.length) return 1;
+  const index = Math.min(counts.length - 1, Math.ceil(counts.length * 0.95) - 1);
+  return Math.max(1, counts[index]);
+}
+
+function densityFeature(item, cap, bucketIndex, bucketCount) {
+  const feature = new ol.Feature({ geometry: new ol.geom.Point(toMapCoordinate(item)) });
+  const countWeight = Math.max(0.05, Math.min(1, Number(item.count || 0) / cap));
+  const timeWeight = bucketCount <= 1 ? 1 : 0.35 + (bucketIndex / (bucketCount - 1)) * 0.65;
+  feature.set("weight", Math.max(0.05, countWeight * timeWeight));
+  return feature;
+}
+
+function stopDensityEvolution() {
+  state.densityEvolution.seq += 1;
+  abortApiRequest("density");
+  if (state.densityEvolution.frame) {
+    cancelAnimationFrame(state.densityEvolution.frame);
+    state.densityEvolution.frame = null;
+  }
+  if (state.densityEvolution.timer) {
+    clearTimeout(state.densityEvolution.timer.id ?? state.densityEvolution.timer);
+    state.densityEvolution.timer.resolve?.();
+    state.densityEvolution.timer = null;
+  }
+}
+
+function buildAnalysisHeatFrames(startIso, endIso, stepMinutes) {
+  const start = new Date(String(startIso).replace(" ", "T"));
+  const end = new Date(String(endIso).replace(" ", "T"));
+  const stepMillis = Math.max(1, Number(stepMinutes || 0)) * 60 * 1000;
+  if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || start >= end || !Number.isFinite(stepMillis) || stepMillis < 1) {
+    return [];
+  }
+  const frames = [];
+  for (let frameStart = start.getTime(); frameStart < end.getTime(); frameStart += stepMillis) {
+    const frameEnd = Math.min(frameStart + stepMillis, end.getTime());
+    frames.push({
+      start: toIso(new Date(frameStart)),
+      end: toIso(new Date(frameEnd))
+    });
+  }
+  return frames;
+}
+
+function renderHeatSource(features) {
+  if (state.layers.heat) {
+    const source = state.layers.heat.getSource();
+    source.clear();
+    source.addFeatures(features);
+    return;
+  }
+  const source = new ol.source.Vector({ features });
+  state.layers.heat = new ol.layer.Heatmap({
     source,
     radius: 28,
     blur: 18,
@@ -1797,9 +2485,115 @@ function renderHeat() {
     gradient: ["rgba(64,132,255,0)", "rgb(64,132,255)", "rgb(88,211,141)", "rgb(255,213,79)", "rgb(232,76,61)"],
     weight: (feature) => feature.get("weight")
   });
-  heat.setZIndex(20);
-  state.map.addLayer(heat);
-  state.layers.heat = heat;
+  state.layers.heat.setZIndex(20);
+  state.map.addLayer(state.layers.heat);
+}
+
+function updateAnalysisProgress(index = state.densityEvolution.index, total = state.densityEvolution.frames.length) {
+  const panel = $("analysis-progress");
+  const range = $("analysis-progress-range");
+  const label = $("analysis-frame-label");
+  const time = $("analysis-frame-time");
+  if (!panel || !range || !label || !time) return;
+  const hasFrames = total > 0;
+  panel.classList.toggle("hidden", !hasFrames);
+  range.disabled = !hasFrames;
+  range.max = String(Math.max(0, total - 1));
+  range.value = String(Math.min(Math.max(0, index), Math.max(0, total - 1)));
+  label.textContent = hasFrames ? `${Number(range.value) + 1}/${total}` : "0/0";
+  const frame = state.densityEvolution.frames[Number(range.value)];
+  time.textContent = frame ? `${frame.start} 至 ${frame.end}` : "--";
+}
+
+function resetAnalysisProgress() {
+  state.densityEvolution.frames = [];
+  state.densityEvolution.index = 0;
+  state.densityEvolution.cache = new Map();
+  state.densityEvolution.bbox = null;
+  state.densityEvolution.zoom = null;
+  updateAnalysisProgress(0, 0);
+}
+
+function waitAnalysisStep() {
+  return new Promise((resolve) => {
+    const timer = { id: null, resolve };
+    timer.id = setTimeout(() => {
+      if (state.densityEvolution.timer === timer) {
+        state.densityEvolution.timer = null;
+      }
+      resolve();
+    }, ANALYSIS_STEP_DURATION_MS);
+    state.densityEvolution.timer = timer;
+  });
+}
+
+async function renderAnalysisHeatFrame(index, seq, trace) {
+  const frames = state.densityEvolution.frames;
+  const frame = frames[index];
+  if (!frame || seq !== state.densityEvolution.seq || state.mode !== "analysis") return false;
+  let items = state.densityEvolution.cache.get(index);
+  if (!items) {
+    const params = qs({ start: frame.start, end: frame.end, zoom: state.densityEvolution.zoom, ...state.densityEvolution.bbox });
+    const data = await getJson(`/api/analysis/density?${params}`, { trace, requestKey: "density" });
+    if (seq !== state.densityEvolution.seq || state.mode !== "analysis") return false;
+    items = data.items || [];
+    state.densityEvolution.cache.set(index, items);
+  }
+  state.densityEvolution.index = index;
+  state.density = items;
+  renderHeat();
+  updateMetrics();
+  updateAnalysisProgress(index, frames.length);
+  setStatus(`态势热力 ${index + 1}/${frames.length} 帧，当前 ${state.density.length.toLocaleString()} 个网格`);
+  return true;
+}
+
+function clearRealtimeHeat() {
+  state.realtimeHeat.seq += 1;
+  if (state.realtimeHeat.timer) {
+    clearTimeout(state.realtimeHeat.timer);
+    state.realtimeHeat.timer = null;
+  }
+  if (state.mode === "realtime" && state.layers.heat) {
+    state.map?.removeLayer(state.layers.heat);
+    state.layers.heat = null;
+  }
+}
+
+function scheduleRealtimeHeat(delay = 280) {
+  if (state.mode !== "realtime" || getMapZoom() > LOW_ZOOM_HEAT_MAX_ZOOM) return;
+  if (state.realtimeHeat.timer) clearTimeout(state.realtimeHeat.timer);
+  state.realtimeHeat.timer = setTimeout(() => {
+    state.realtimeHeat.timer = null;
+    loadRealtimeHeat().catch((error) => setStatus("实时热力加载失败: " + error.message));
+  }, delay);
+}
+
+async function loadRealtimeHeat() {
+  if (state.mode !== "realtime" || getMapZoom() > LOW_ZOOM_HEAT_MAX_ZOOM) return;
+  const windowValue = state.realtimeWindow || realtimeWindowParams();
+  const bbox = currentDataBBox();
+  if (!windowValue || !bbox) return;
+  const seq = ++state.realtimeHeat.seq;
+  const params = qs({ ...windowValue, zoom: getMapZoom(), ...bbox });
+  const data = await getJson(`/api/analysis/density?${params}`, { requestKey: "realtime-heat" });
+  if (seq !== state.realtimeHeat.seq || state.mode !== "realtime" || getMapZoom() > LOW_ZOOM_HEAT_MAX_ZOOM) return;
+  state.realtimeHeat.items = data.items || [];
+  const cap = densityWeightCap(state.realtimeHeat.items);
+  renderHeatSource(state.realtimeHeat.items.map((item) => densityFeature(item, cap, 0, 1)));
+}
+
+function renderHeat() {
+  if (!state.map || state.mode !== "analysis") return;
+  const items = state.density || [];
+  if (!items.length) {
+    if (state.layers.heat) {
+      renderHeatSource([]);
+    }
+    return;
+  }
+  const cap = densityWeightCap(items);
+  renderHeatSource(items.map((item) => densityFeature(item, cap, 0, 1)));
 }
 
 function afterTrackRenderComplete(callback) {
@@ -1832,11 +2626,17 @@ function renderTracks() {
   state.layers.trackRenderCallbacks = [];
   state.layers.trackSource?.clear();
   state.layers.playbackTrackSource?.clear();
+  state.layers.endpointSource?.clear();
+  state.layers.hoverTrackShip = null;
   state.layers.lines = [];
   preparePlaybackRuntime();
   state.layers.lineQueue = state.mode === "single"
-    ? state.playback.groupedTracks.map(({ ship, points, index }) => ({ ship, points, index, palette: TRACK_PALETTE }))
-    : [];
+    ? state.playback.groupedTracks.map(({ ship, points, index }) => ({ ship, points, index, palette: SINGLE_TRACK_PALETTE }))
+    : state.mode === "multi"
+      ? state.playback.groupedTracks.map(({ ship, points, index }) => ({ ship, points, index, palette: TRACK_PALETTE }))
+      : state.mode === "global" && state.global.showTracks
+        ? state.playback.groupedTracks.map(({ ship, points, index }) => ({ ship, points, index, palette: TRACK_PALETTE }))
+      : [];
   drawLineBatch();
   renderPlaybackMarkers();
 }
@@ -1870,12 +2670,94 @@ function drawLineBatch() {
   }
 }
 
+function extensionHandleStyle() {
+  return new ol.style.Style({
+    image: new ol.style.Circle({
+      radius: 8,
+      fill: new ol.style.Fill({ color: "rgba(255,255,255,0.75)" }),
+      stroke: new ol.style.Stroke({ color: "rgba(37,99,235,0.75)", width: 1.5 })
+    }),
+    text: new ol.style.Text({
+      text: "+",
+      font: "bold 13px sans-serif",
+      fill: new ol.style.Fill({ color: "rgba(37,99,235,0.75)" }),
+      offsetY: -1
+    })
+  });
+}
+
+function renderTrackExtensionHandles(ship) {
+  state.layers.endpointSource?.clear();
+  if (!["single", "multi"].includes(state.mode) || !state.playback.prepared || !ship) return;
+  state.playback.groupedTracks.filter((track) => track.ship === ship).forEach(({ points }) => {
+    if (!points?.length) return;
+    [
+      { point: points[0], direction: "start" },
+      { point: points[points.length - 1], direction: "end" }
+    ].forEach(({ point, direction }) => {
+      const feature = new ol.Feature({
+        geometry: new ol.geom.Point(point._mapCoordinate || toMapCoordinate(point)),
+        extendTrack: direction
+      });
+      feature.setStyle(extensionHandleStyle());
+      state.layers.endpointSource?.addFeature(feature);
+    });
+  });
+}
+
+function updateTrackExtensionHover(event) {
+  if (!["single", "multi"].includes(state.mode) || !state.map) return;
+  let nextShip = null;
+  state.map.forEachFeatureAtPixel(event.pixel, (feature) => {
+    nextShip = feature.get("ship") || nextShip;
+    return nextShip ? feature : undefined;
+  }, { layerFilter: (layer) => layer === state.layers.trackLayer, hitTolerance: 6 });
+  if (nextShip === state.layers.hoverTrackShip) return;
+  state.layers.hoverTrackShip = nextShip;
+  renderTrackExtensionHandles(nextShip);
+}
+
+function clearTrackExtensionHover() {
+  if (!state.layers.hoverTrackShip && state.layers.endpointSource?.getFeatures().length === 0) return;
+  state.layers.hoverTrackShip = null;
+  state.layers.endpointSource?.clear();
+}
+
+function handleTrackExtensionClick(event) {
+  if (!["single", "multi"].includes(state.mode) || !state.map) return false;
+  let direction = "";
+  state.map.forEachFeatureAtPixel(event.pixel, (feature) => {
+    direction = feature.get("extendTrack") || direction;
+    return direction ? feature : undefined;
+  }, { layerFilter: (layer) => layer === state.layers.endpointLayer, hitTolerance: 8 });
+  if (!direction) return false;
+  extendActiveTrackWindow(direction);
+  return true;
+}
+
+function extendActiveTrackWindow(direction) {
+  pausePlayback();
+  if (state.mode === "single") {
+    const input = direction === "start" ? $("single-before-hours") : $("single-after-hours");
+    input.value = String(Math.max(0, Number(input.value || 0)) + TRACK_EXTENSION_HOURS);
+    loadSingleTrack().catch((error) => showError(error.message));
+    return;
+  }
+  const input = direction === "start" ? $("start") : $("end");
+  const date = input?.value ? new Date(input.value) : null;
+  if (!date || !Number.isFinite(date.getTime())) return;
+  date.setHours(date.getHours() + (direction === "start" ? -TRACK_EXTENSION_HOURS : TRACK_EXTENSION_HOURS));
+  input.value = toLocalDatetime(date);
+  loadMultiTrack().catch((error) => showError(error.message));
+}
+
 function updatePlaybackTrail() {
   if (!state.map || !["single", "multi", "global"].includes(state.mode)) return;
   state.layers.playbackTrackSource?.clear();
   const visible = state.trackPoints.slice(0, Math.max(1, state.playIndex + 1));
   if (visible.length < 2) return;
   const batchWidth = state.mode === "global" ? 2.5 : 4.5;
+  const palette = state.mode === "single" ? SINGLE_TRACK_PALETTE : TRACK_PALETTE;
   const grouped = Array.from(groupByShip(visible).entries());
   grouped.forEach(([ship, points], index) => {
     if (points.length < 2) return;
@@ -1886,7 +2768,7 @@ function updatePlaybackTrail() {
     });
     line.setStyle(new ol.style.Style({
       stroke: new ol.style.Stroke({
-        color: withOpacity(TRACK_PALETTE[index % TRACK_PALETTE.length], PLAYBACK_LINE_OPACITY),
+        color: withOpacity(palette[index % palette.length], PLAYBACK_LINE_OPACITY),
         width: batchWidth,
         lineJoin: "round",
         lineCap: "round"
@@ -1899,7 +2781,11 @@ function updatePlaybackTrail() {
 function renderPlaybackMarkers() {
   if (!state.map || !["single", "multi", "global"].includes(state.mode)) return;
   if (state.mode === "multi") {
-    renderMultiPlaybackWindow();
+    if (state.playback.performanceMode) {
+      syncIncrementalPlaybackToIndex(state.playIndex);
+    } else {
+      updatePlaybackTrail();
+    }
     updateMetrics();
     return;
   }
@@ -1935,54 +2821,8 @@ function renderPlaybackMarkers() {
   updateMetrics();
 }
 
-function renderMultiPlaybackWindow() {
-  state.layers.playbackTrackSource?.clear();
-  state.layers.markerSource?.clear();
-  state.layers.markers = [];
-  const activePoint = state.trackPoints[state.playIndex];
-  const activeTime = pointTimeMillis(activePoint);
-  if (!activePoint || !activeTime) return;
-  const startTime = activeTime - MULTI_PLAYBACK_TRAIL_WINDOW_MS;
-  const visible = state.trackPoints.filter((point) => {
-    const time = pointTimeMillis(point);
-    return time >= startTime && time <= activeTime;
-  });
-  Array.from(groupByShip(visible).entries()).forEach(([, points], index) => {
-    if (!points.length) return;
-    const markerPoint = points[points.length - 1];
-    if (points.length >= 2) {
-      const line = new ol.Feature({
-        geometry: new ol.geom.LineString(points.map((point) => point._mapCoordinate || toMapCoordinate(point))),
-        ship: markerPoint.shipId,
-        points: points.length
-      });
-      line.setStyle(new ol.style.Style({
-        stroke: new ol.style.Stroke({
-          color: withOpacity(TRACK_PALETTE[index % TRACK_PALETTE.length], PLAYBACK_LINE_OPACITY),
-          width: playbackLineWidth(),
-          lineJoin: "round",
-          lineCap: "round"
-        })
-      }));
-      state.layers.playbackTrackSource?.addFeature(line);
-    }
-    addPlaybackMarker(markerPoint);
-  });
-}
-
 function renderGlobalPlaybackPositions() {
-  state.layers.playbackTrackSource?.clear();
-  state.layers.markerSource?.clear();
-  state.layers.markers = [];
-  const activePoint = state.trackPoints[state.playIndex];
-  const activeTime = pointTimeMillis(activePoint);
-  if (!activePoint || !activeTime) return;
-  const latestByShip = new Map();
-  for (const point of state.trackPoints) {
-    if (pointTimeMillis(point) > activeTime) break;
-    latestByShip.set(point.shipId, point);
-  }
-  latestByShip.forEach((point) => addPlaybackMarker(point));
+  syncPositionPlaybackToIndex(state.playIndex);
 }
 
 function addPlaybackMarker(point) {
@@ -1996,18 +2836,30 @@ function addPlaybackMarker(point) {
 }
 
 async function loadLatest() {
-  setStatus("正在加载实时船位");
-  state.latest = [];
-  const windowQuery = realtimeWindowQuery();
+  if (!state.map) return;
+  const viewportQuery = realtimeViewportQuery();
+  if (!viewportQuery) return;
+  setStatus("正在加载当前视野船位");
+  state.layers.realtimePreviewSeq += 1;
+  state.layers.trackSource?.clear();
   const trace = beginApiTrace("实时位置");
   try {
-    const data = await getJson("/api/realtime/latest" + (windowQuery ? "?" + windowQuery : ""), { trace });
+    const data = await getJson(`/api/realtime/viewport?${viewportQuery}`, { trace, requestKey: "latest" });
     syncRealtimeWindowInputs(data.window);
-    syncAnalysisWindowInputs(data.window);
     syncSingleWindowInputs(data.window);
     state.realtimeWindow = data.window || null;
-    buildRealtimeStore(normalizeRealtimeItems(data));
+    state.realtimeViewportMode = data.mode || "points";
+    if (state.realtimeViewportMode === "points") {
+      buildRealtimeStore(normalizeRealtimeItems(data));
+      state.realtimeHeat.items = [];
+      state.realtimeHeat.total = 0;
+    } else {
+      buildRealtimeStore([]);
+      state.realtimeHeat.items = normalizeAggregateItems(data);
+      state.realtimeHeat.total = Number(data.total || 0);
+    }
     state.stats.memoryShips = Number(data.memoryShips ?? state.latest.length ?? 0);
+    state.stats.viewportShips = Number(data.total ?? state.latest.length ?? 0);
     const maxTime = state.latest.reduce((max, item) => (item.time > max ? item.time : max), "");
     if (maxTime) {
       const end = new Date(maxTime.replace(" ", "T"));
@@ -2017,9 +2869,12 @@ async function loadLatest() {
     }
     renderRealtime();
     updateMetrics();
-    scheduleRealtimeSummary(0);
-    const sourceText = data.source === "memory" ? "内存缓存" : "数据库查询";
-    setStatus(`${sourceText}已加载 ${state.latest.length.toLocaleString()} 条最新船位，当前视野 ${state.stats.viewportShips.toLocaleString()} 艘`);
+    if (isStatsEnabled()) {
+      deferAuxiliaryWork(() => scheduleRealtimeSummary(0));
+    }
+    const visibleText = Number(data.total ?? state.latest.length ?? 0).toLocaleString();
+    const itemText = Number((data.items || []).length).toLocaleString();
+    setStatus(`内存缓存当前视野 ${visibleText} 艘，返回 ${itemText} 条${state.realtimeViewportMode === "points" ? "船位" : "聚合"}`);
   } finally {
     finishApiTrace(trace);
   }
@@ -2027,22 +2882,69 @@ async function loadLatest() {
 
 async function loadDensity() {
   switchMode("analysis");
-  setStatus("正在查询态势密度");
+  stopDensityEvolution();
+  resetAnalysisProgress();
+  state.density = [];
+  renderHeat();
+  setStatus("正在查询态势热力");
   const windowValue = analysisWindowParams();
-  if (!windowValue) {
+  const stepMinutes = analysisStepMinutes();
+  if (!windowValue || !stepMinutes) {
     showError("分析时间窗无效");
     setStatus("分析时间窗无效");
     return;
   }
+  const bbox = currentDataBBox();
+  if (!bbox) {
+    showError("当前视野无效");
+    setStatus("当前视野无效");
+    return;
+  }
+  const zoom = getMapZoom();
+  const frames = buildAnalysisHeatFrames(windowValue.start, windowValue.end, stepMinutes);
+  if (!frames.length) {
+    showError("分析时间窗无效");
+    setStatus("分析时间窗无效");
+    return;
+  }
+  state.densityEvolution.frames = frames;
+  state.densityEvolution.index = 0;
+  state.densityEvolution.cache = new Map();
+  state.densityEvolution.bbox = bbox;
+  state.densityEvolution.zoom = zoom;
+  updateAnalysisProgress(0, frames.length);
+  const seq = state.densityEvolution.seq;
   const trace = beginApiTrace("态势分析");
   try {
-    const params = qs({ ...windowValue, zoom: getMapZoom(), ...(currentDataBBox() || {}) });
-    const data = await getJson(`/api/analysis/density?${params}`, { trace });
-    state.density = data.items;
-    renderHeat();
-    updateMetrics();
+    for (let index = 0; index < frames.length; index += 1) {
+      if (seq !== state.densityEvolution.seq || state.mode !== "analysis") return;
+      const rendered = await renderAnalysisHeatFrame(index, seq, trace);
+      if (!rendered) return;
+      if (index + 1 < frames.length) {
+        await waitAnalysisStep();
+      }
+    }
     scheduleRealtimeSummary(0);
-    setStatus(`密度网格 ${state.density.length.toLocaleString()} 个`);
+    setStatus(`态势热力播放完成，共 ${frames.length.toLocaleString()} 帧`);
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    throw error;
+  } finally {
+    finishApiTrace(trace);
+  }
+}
+
+async function seekAnalysisHeatFrame(index) {
+  if (!state.densityEvolution.frames.length) return;
+  stopDensityEvolution();
+  const nextIndex = Math.min(Math.max(0, Number(index || 0)), state.densityEvolution.frames.length - 1);
+  const seq = state.densityEvolution.seq;
+  const trace = beginApiTrace("态势热力跳帧");
+  try {
+    await renderAnalysisHeatFrame(nextIndex, seq, trace);
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    throw error;
   } finally {
     finishApiTrace(trace);
   }
@@ -2077,10 +2979,11 @@ async function loadSingleTrack() {
       samplingMode: sampling.samplingMode,
       bucketSeconds: sampling.bucketSeconds
     });
-    const data = await getJson(`/api/tracks/single?${params}`, { trace });
-    state.trackPoints = data.items || [];
+    const data = await getJson(`/api/tracks/single?${params}`, { trace, requestKey: "single-track" });
+    const serverPoints = data.items || [];
+    state.trackPoints = assignPlaybackHeadings(suppressSingleTrackJitter(serverPoints));
     state.playIndex = 0;
-    if (!state.stats.databaseStatsLoaded) {
+    if (isStatsEnabled() && !state.stats.databaseStatsLoaded) {
       refreshDatabaseStats().catch(() => {});
     }
     renderTracks();
@@ -2088,11 +2991,13 @@ async function loadSingleTrack() {
       if (statsSeq !== state.stats.singleStatsSeq) return;
       state.stats.singleSampledTrackPoints = state.trackPoints.length;
       if (sampling.samplingMode === "raw") {
-        state.stats.singleRawTrackPoints = state.trackPoints.length;
+        state.stats.singleRawTrackPoints = serverPoints.length;
         updateMetrics();
       } else {
         updateMetrics();
-        refreshSingleTrackPointStats(windowValue, shipId, statsSeq).catch((error) => setStatus("单船统计刷新失败: " + error.message));
+        if (isStatsEnabled()) {
+          refreshSingleTrackPointStats(windowValue, shipId, statsSeq).catch((error) => setStatus("单船统计刷新失败: " + error.message));
+        }
       }
     });
     syncPlayButtons();
@@ -2107,13 +3012,6 @@ function multiTimeWindowParams() {
   const end = $("end")?.value;
   if (!start || !end) return null;
   return { start: toIso(start), end: toIso(end) };
-}
-
-function selectedCandidateTypes() {
-  const types = [];
-  if ($("candidate-type-ais")?.checked) types.push("ais");
-  if ($("candidate-type-radar")?.checked) types.push("radar");
-  return types;
 }
 
 function multiQueryBBox() {
@@ -2203,8 +3101,6 @@ function multiSelectionFromPage(page) {
 
 function sortCandidateItems(items) {
   return [...(items || [])].sort((left, right) => {
-    const typeRank = Number(right.isAis || 0) - Number(left.isAis || 0);
-    if (typeRank !== 0) return typeRank;
     const pointsRank = Number(right.points || 0) - Number(left.points || 0);
     if (pointsRank !== 0) return pointsRank;
     return String(left.shipId || "").localeCompare(String(right.shipId || ""));
@@ -2272,8 +3168,8 @@ function renderCandidateDrawer() {
     const title = document.createElement("strong");
     title.textContent = ship.shipName ? `${ship.shipName} / ${ship.shipId}` : String(ship.shipId || "");
     const meta = document.createElement("span");
-    meta.textContent = `${ship.shipType === "ais" ? "AIS" : "雷达"} · ${Number(ship.points || 0).toLocaleString()} 条`;
-    row.title = `${ship.shipName ? `${ship.shipName} / ` : ""}${ship.shipId || ""} · ${ship.shipType === "ais" ? "AIS" : "雷达"} · ${Number(ship.points || 0).toLocaleString()} 条 · ${ship.firstTime || "--"} ~ ${ship.lastTime || "--"}`;
+    meta.textContent = `${Number(ship.points || 0).toLocaleString()} 条`;
+    row.title = `${ship.shipName ? `${ship.shipName} / ` : ""}${ship.shipId || ""} · ${Number(ship.points || 0).toLocaleString()} 条 · ${ship.firstTime || "--"} ~ ${ship.lastTime || "--"}`;
     text.append(title, meta);
     row.append(checkbox, text);
     list.append(row);
@@ -2295,7 +3191,7 @@ function chunkCandidateItems(items, startPage) {
   return pages;
 }
 
-async function loadCandidateBatch(batchIndex, shipTypes, bbox, trace) {
+async function loadCandidateBatch(batchIndex, bbox, trace) {
   const windowValue = multiTimeWindowParams();
   if (!windowValue) {
     throw new Error("多船时间范围无效");
@@ -2304,10 +3200,9 @@ async function loadCandidateBatch(batchIndex, shipTypes, bbox, trace) {
     ...windowValue,
     ...bbox,
     page: batchIndex,
-    pageSize: CANDIDATE_BATCH_SIZE,
-    shipTypes: shipTypes.join(",")
+    pageSize: CANDIDATE_BATCH_SIZE
   });
-  const data = await getJson(`/api/tracks/candidates?${params}`, { trace });
+    const data = await getJson(`/api/tracks/candidates?${params}`, { trace, requestKey: "candidates" });
   return { batchIndex, items: sortCandidateItems(data.items || []) };
 }
 
@@ -2320,7 +3215,6 @@ async function loadCandidates({ append = false } = {}) {
   const startedAt = performance.now();
   const bbox = multiQueryBBox();
   const windowValue = multiTimeWindowParams();
-  const shipTypes = selectedCandidateTypes();
   if (!windowValue) {
     showError("多船时间范围无效");
     setStatus("多船时间范围无效");
@@ -2332,11 +3226,6 @@ async function loadCandidates({ append = false } = {}) {
     return;
   }
   state.multi.bbox = bbox;
-  if (!shipTypes.length) {
-    showError("请至少选择一种船舶类型");
-    setStatus("请至少选择一种船舶类型");
-    return;
-  }
   const trace = beginApiTrace("候选船舶");
   state.multi.candidateLoading = true;
   renderCandidateDrawer();
@@ -2347,7 +3236,7 @@ async function loadCandidates({ append = false } = {}) {
     const nextPages = append
       ? state.multi.candidatePages.map((item) => ({ page: item.page, items: item.items.slice() }))
       : [];
-    const result = await loadCandidateBatch(batchIndex, shipTypes, bbox, trace);
+    const result = await loadCandidateBatch(batchIndex, bbox, trace);
     const batchPages = chunkCandidateItems(result.items || [], startPage);
     for (const resultPage of batchPages) {
       const existingIndex = nextPages.findIndex((item) => item.page === resultPage.page);
@@ -2472,8 +3361,8 @@ async function loadMultiTrack() {
       zoom: getMapZoom(),
       samplingMode: sampling.samplingMode,
       bucketSeconds: sampling.bucketSeconds
-    }, { trace });
-    state.trackPoints = data.items || [];
+    }, { trace, requestKey: "multi-track" });
+    state.trackPoints = assignPlaybackHeadings(normalizeTrackItems(data));
     state.playIndex = 0;
     renderTracks();
     afterTrackRenderComplete(() => {
@@ -2496,22 +3385,39 @@ async function loadMultiTrack() {
 
 async function loadGlobalSegment() {
   switchMode("global");
+  syncGlobalWsControls();
+  closeGlobalReplaySocket();
+  if (state.global.wsEnabled) {
+    return loadGlobalSegmentWs();
+  }
+  return loadGlobalSegmentHttp();
+}
+
+function resetGlobalReplayLoadState() {
   setStatus("正在加载全域回放");
   const windowValue = globalWindowParams();
   if (!windowValue) {
     showError("全域时间范围无效");
     setStatus("全域时间范围无效");
-    return;
+    return null;
   }
-  const trace = beginApiTrace("全域回放");
   pausePlayback();
   const statsSeq = ++state.global.stats.statsSeq;
   state.trackPoints = [];
+  state.global.allTrackPoints = [];
   state.playIndex = 0;
   state.global.stats.sampledTrackPoints = 0;
   renderTracks();
   updateMetrics();
   syncPlayButtons();
+  return { windowValue, statsSeq };
+}
+
+async function loadGlobalSegmentHttp() {
+  const loadState = resetGlobalReplayLoadState();
+  if (!loadState) return;
+  const { windowValue, statsSeq } = loadState;
+  const trace = beginApiTrace("全域回放");
   try {
     const sampling = activeSamplingParams();
     const params = qs({
@@ -2520,8 +3426,8 @@ async function loadGlobalSegment() {
       samplingMode: sampling.samplingMode,
       bucketSeconds: sampling.bucketSeconds
     });
-    const data = await getJson(`/api/tracks/global-segment?${params}`, { trace });
-    state.trackPoints = data.items || [];
+    const data = await getJson(`/api/tracks/global-segment?${params}`, { trace, requestKey: "global-segment" });
+    setGlobalTrackPoints(normalizeTrackItems(data));
     state.playIndex = 0;
     renderTracks();
     afterTrackRenderComplete(() => {
@@ -2533,20 +3439,102 @@ async function loadGlobalSegment() {
     syncPlayButtons();
     const end = new Date(windowValue.timePoint);
     const start = new Date(end.getTime() - Number(windowValue.hours || 1) * 60 * 60 * 1000);
-    setStatus(`已加载 ${toLocalDatetime(start)} - ${toLocalDatetime(end)}，${(data.items || []).length.toLocaleString()} 个${playbackPointLabel()}`);
+    setStatus(`已加载 ${toLocalDatetime(start)} - ${toLocalDatetime(end)}，前端过滤后 ${state.trackPoints.length.toLocaleString()} / ${(data.items || []).length.toLocaleString()} 个${playbackPointLabel()}`);
   } finally {
     finishApiTrace(trace);
   }
 }
 
+function loadGlobalSegmentWs() {
+  const loadState = resetGlobalReplayLoadState();
+  if (!loadState) return Promise.resolve();
+  const { windowValue, statsSeq } = loadState;
+  const sampling = activeSamplingParams();
+  const trace = beginApiTrace("全域回放 WS");
+  const seq = ++state.global.ws.seq;
+  const socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/global-replay`);
+  state.global.ws.socket = socket;
+  state.global.ws.trace = trace;
+  return new Promise((resolve, reject) => {
+    let completed = false;
+    socket.onopen = () => {
+      socket.send(JSON.stringify({
+        type: "start",
+        ...windowValue,
+        zoom: String(getMapZoom()),
+        samplingMode: sampling.samplingMode,
+        bucketSeconds: String(sampling.bucketSeconds)
+      }));
+    };
+    socket.onmessage = (event) => {
+      if (seq !== state.global.ws.seq) return;
+      const payload = JSON.parse(event.data);
+      if (payload.type === "started") {
+        setStatus(`全域 WS 已连接，准备加载 ${payload.totalChunks || 0} 个分片`);
+        return;
+      }
+      if (payload.type === "chunk") {
+        const points = normalizeTrackItems(payload);
+        state.global.allTrackPoints.push(...points);
+        const selectedTypes = selectedGlobalTypeIds();
+        state.trackPoints.push(...points.filter((point) => matchesGlobalType(point, selectedTypes)));
+        state.playIndex = Math.min(state.playIndex, Math.max(0, state.trackPoints.length - 1));
+        renderTracks();
+        if (statsSeq === state.global.stats.statsSeq) {
+          state.global.stats.sampledTrackPoints = state.trackPoints.length;
+          updateMetrics();
+        }
+        syncPlayButtons();
+        setStatus(`全域 WS 加载 ${payload.chunkIndex || 0}/${payload.totalChunks || 0}，前端过滤后 ${state.trackPoints.length.toLocaleString()} / ${state.global.allTrackPoints.length.toLocaleString()} 个${playbackPointLabel()}`);
+        return;
+      }
+      if (payload.type === "complete") {
+        completed = true;
+        if (statsSeq === state.global.stats.statsSeq) {
+          state.global.stats.sampledTrackPoints = state.trackPoints.length;
+          updateMetrics();
+          scheduleGlobalSummary(0);
+        }
+        syncPlayButtons();
+        setStatus(`全域 WS 加载完成，前端过滤后 ${state.trackPoints.length.toLocaleString()} / ${state.global.allTrackPoints.length.toLocaleString()} 个${playbackPointLabel()}`);
+        closeGlobalReplaySocket();
+        resolve();
+        return;
+      }
+      if (payload.type === "error") {
+        completed = true;
+        closeGlobalReplaySocket();
+        reject(new Error(payload.message || "全域 WS 加载失败"));
+      }
+    };
+    socket.onerror = () => {
+      if (seq !== state.global.ws.seq) return;
+      completed = true;
+      closeGlobalReplaySocket();
+      reject(new Error("全域 WS 连接失败"));
+    };
+    socket.onclose = () => {
+      if (seq !== state.global.ws.seq || completed) return;
+      state.global.ws.socket = null;
+      finishApiTrace(trace);
+      state.global.ws.trace = null;
+      reject(new Error("全域 WS 连接已关闭"));
+    };
+  });
+}
+
 function tickPlayer() {
+  state.playback.timer = null;
   if (state.playing && state.trackPoints.length) {
     try {
       const previousIndex = state.playIndex;
       state.playIndex = Math.min(state.trackPoints.length - 1, state.playIndex + 1);
       $("progress").value = state.playIndex;
-      if (state.playback.performanceMode && state.mode === "single") {
+      if (state.playback.performanceMode && (state.mode === "single" || state.mode === "multi")) {
         advanceIncrementalPlayback(previousIndex, state.playIndex);
+        updateMetrics();
+      } else if (state.mode === "global") {
+        advancePositionPlayback(previousIndex, state.playIndex);
         updateMetrics();
       } else {
         renderPlaybackMarkers();
@@ -2561,8 +3549,19 @@ function tickPlayer() {
       syncPlayButtons();
     }
   }
+  if (state.playing) schedulePlayerTick();
+}
+
+function stopPlaybackTimer() {
+  if (!state.playback.timer) return;
+  clearTimeout(state.playback.timer);
+  state.playback.timer = null;
+}
+
+function schedulePlayerTick() {
+  if (!state.playing || state.playback.timer) return;
   const speed = Math.max(1, Number(state.speed) || 1);
-  setTimeout(tickPlayer, Math.max(16, 400 / speed));
+  state.playback.timer = setTimeout(tickPlayer, Math.max(16, 400 / speed));
 }
 
 function createAmapTileLayer() {
@@ -2572,10 +3571,8 @@ function createAmapTileLayer() {
       tileUrlFunction: (tileCoord) => {
         if (!tileCoord) return "";
         const [z, x, y] = tileCoord;
-        const sub = Math.abs(x + y) % 4 + 1;
-        return AMAP_TILE_URL.replace("{sub}", String(sub)).replace("{x}", String(x)).replace("{y}", String(y)).replace("{z}", String(z));
-      },
-      crossOrigin: "anonymous"
+        return AMAP_TILE_URL.replace("{x}", String(x)).replace("{y}", String(y)).replace("{z}", String(z));
+      }
     })
   });
 }
@@ -2588,10 +3585,12 @@ function initMap() {
   state.layers.trackSource = new ol.source.Vector();
   state.layers.playbackTrackSource = new ol.source.Vector();
   state.layers.markerSource = new ol.source.Vector();
+  state.layers.endpointSource = new ol.source.Vector();
   state.layers.rectangleSource = new ol.source.Vector();
   state.layers.trackLayer = new ol.layer.Vector({ source: state.layers.trackSource, zIndex: 30 });
   state.layers.playbackTrackLayer = new ol.layer.Vector({ source: state.layers.playbackTrackSource, zIndex: 31 });
   state.layers.markerLayer = new ol.layer.Vector({ source: state.layers.markerSource, zIndex: 40 });
+  state.layers.endpointLayer = new ol.layer.Vector({ source: state.layers.endpointSource, zIndex: 41 });
   state.layers.rectangleLayer = new ol.layer.Vector({
     source: state.layers.rectangleSource,
     zIndex: 35,
@@ -2600,7 +3599,7 @@ function initMap() {
 
   state.map = new ol.Map({
     target: "map",
-    layers: [createAmapTileLayer(), state.layers.trackLayer, state.layers.playbackTrackLayer, state.layers.rectangleLayer, state.layers.markerLayer],
+    layers: [createAmapTileLayer(), state.layers.trackLayer, state.layers.playbackTrackLayer, state.layers.rectangleLayer, state.layers.markerLayer, state.layers.endpointLayer],
     view: new ol.View({
       center: ol.proj.fromLonLat(center),
       zoom: state.config.defaultZoom
@@ -2611,7 +3610,7 @@ function initMap() {
   state.map.on("movestart", syncRealtimeCanvasDuringMove);
   state.map.on("pointerdrag", syncRealtimeCanvasDuringMove);
   state.map.on("moveend", () => {
-    renderRealtimeNow();
+    if (state.mode === "realtime") loadLatest().catch((error) => showError(error.message));
     if (state.mode === "analysis") scheduleRealtimeSummary();
   });
   state.map.getView().on("change:resolution", () => {
@@ -2621,13 +3620,18 @@ function initMap() {
   });
   state.map.on("pointermove", handleRealtimePointerMove);
   state.map.on("click", handleRealtimeClick);
-  $("map").addEventListener("mouseleave", hideShipInfo);
+  $("map").addEventListener("mouseleave", () => {
+    hideShipInfo();
+    clearTrackExtensionHover();
+  });
 }
 
 async function init() {
   try {
     state.apiTrace.hidden = loadApiTraceHidden();
     $("api-trace-toggle").onclick = () => setApiTraceHidden(false);
+    state.stats.enabled = loadStatsEnabled();
+    syncStatsToggle();
     state.config = await getJson("/api/config/map");
     initMap();
     document.addEventListener("click", handleRealtimeDomClick, true);
@@ -2636,14 +3640,15 @@ async function init() {
       scheduleRealtimeRender(50);
     }, { passive: true });
     bindEvents();
-    refreshDatabaseStats().catch(() => {});
     await loadLatest().catch((error) => {
       showError(error.message);
       setStatus("Database is unavailable; map page loaded");
     });
-    connectWebSocket();
+    if (isStatsEnabled()) {
+      deferAuxiliaryWork(() => refreshDatabaseStats().catch(() => {}));
+    }
     syncSamplingControls();
-    tickPlayer();
+    syncGlobalTrackControls();
   } catch (error) {
     showError(error.message);
   }
@@ -2667,19 +3672,27 @@ function connectWebSocket() {
 function bindEvents() {
   document.querySelectorAll(".nav").forEach((button) => button.addEventListener("click", () => switchMode(button.dataset.mode)));
   $("load-latest").onclick = () => loadLatest().catch((error) => showError(error.message));
+  $("stats-toggle").onclick = () => setStatsEnabled(!isStatsEnabled());
   $("realtime-point").onchange = () => loadLatest().catch((error) => showError(error.message));
   $("realtime-minutes").onchange = () => loadLatest().catch((error) => showError(error.message));
-  $("realtime-type").onchange = () => {
-    if (state.mode === "realtime") {
-      renderRealtime();
-      updateMetrics();
-    }
-  };
+  document.querySelectorAll("[data-realtime-type]").forEach((input) => {
+    input.onchange = () => {
+      if (state.mode === "realtime") {
+        loadLatest().catch((error) => showError(error.message));
+        updateMetrics();
+      }
+    };
+  });
+  $("realtime-multi-play").onclick = useRealtimeSelectionForMultiTrack;
+  $("realtime-clear-selected").onclick = clearRealtimeSelection;
   $("load-density").onclick = () => loadDensity().catch((error) => showError(error.message));
-  $("analysis-point").onchange = () => {
+  $("analysis-start").onchange = () => {
     scheduleRealtimeSummary(0);
   };
-  $("analysis-minutes").onchange = () => {
+  $("analysis-end").onchange = () => {
+    scheduleRealtimeSummary(0);
+  };
+  $("analysis-step-minutes").onchange = () => {
     scheduleRealtimeSummary(0);
   };
   $("start").onchange = () => {
@@ -2708,6 +3721,11 @@ function bindEvents() {
     }
   };
   $("single-after-hours").onchange = () => {
+    if (state.mode === "single") {
+      loadSingleTrack().catch((error) => showError(error.message));
+    }
+  };
+  $("single-jitter-meters").onchange = () => {
     if (state.mode === "single") {
       loadSingleTrack().catch((error) => showError(error.message));
     }
@@ -2743,16 +3761,6 @@ function bindEvents() {
   };
   $("draw-box").onclick = drawBox;
   $("clear-box").onclick = clearMultiBBoxAndCandidates;
-  $("candidate-type-ais").onchange = () => {
-    if (state.mode === "multi") {
-      loadCandidates().catch((error) => showError(error.message));
-    }
-  };
-  $("candidate-type-radar").onchange = () => {
-    if (state.mode === "multi") {
-      loadCandidates().catch((error) => showError(error.message));
-    }
-  };
   $("candidate-prev-page").onclick = () => {
     if (state.mode === "multi") gotoCandidatePage(-1);
   };
@@ -2776,6 +3784,26 @@ function bindEvents() {
     renderCandidateDrawer();
   };
   $("load-global").onclick = () => loadGlobalSegment().catch((error) => showError(error.message));
+  $("global-ws-mode").onchange = () => {
+    state.global.wsEnabled = $("global-ws-mode").checked;
+    if (!state.global.wsEnabled) {
+      closeGlobalReplaySocket();
+    }
+  };
+  $("global-show-tracks").onchange = () => {
+    state.global.showTracks = $("global-show-tracks").checked;
+    if (state.mode === "global") {
+      renderTracks();
+      setStatus(state.global.showTracks ? "全域轨迹展示已开启" : "全域轨迹展示已关闭");
+    }
+  };
+  document.querySelectorAll("[data-global-type]").forEach((input) => {
+    input.onchange = () => {
+      if (state.mode === "global") {
+        applyGlobalTrackFilter();
+      }
+    };
+  });
   $("global-point").onchange = () => {
     if (state.mode === "global") {
       scheduleGlobalSummary(0);
@@ -2796,7 +3824,15 @@ function bindEvents() {
     state.playIndex = Number($("progress").value);
     renderPlaybackMarkers();
   };
+  $("analysis-progress-range").oninput = () => {
+    updateAnalysisProgress(Number($("analysis-progress-range").value), state.densityEvolution.frames.length);
+  };
+  $("analysis-progress-range").onchange = () => {
+    seekAnalysisHeatFrame(Number($("analysis-progress-range").value)).catch((error) => showError(error.message));
+  };
   syncPlayButtons();
+  syncGlobalWsControls();
+  updateRealtimeSelectionControls();
 }
 
 init();

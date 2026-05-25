@@ -7,10 +7,14 @@ import com.shiptrack.model.TimeWindow;
 import com.shiptrack.realtime.RealtimeService;
 import com.shiptrack.telemetry.RequestMetricsService;
 import com.shiptrack.track.TrackRepository;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -26,6 +30,8 @@ import org.springframework.web.bind.annotation.RestController;
 @ConditionalOnProperty(name = "ship.mode", havingValue = "server", matchIfMissing = true)
 public class ApiController {
   private static final Logger log = LoggerFactory.getLogger(ApiController.class);
+  private static final List<String> TRACK_COMPACT_FIELDS = List.of(
+      "shipId", "shipName", "lng", "lat", "speed", "heading", "isAis", "shipType", "time", "bucketStart");
   private final ShipConfigService configService;
   private final ShipTrackConfig config;
   private final TrackRepository repository;
@@ -50,6 +56,7 @@ public class ApiController {
       body.put("defaultZoom", config.map.defaultZoom);
       body.put("maxMultiShips", config.query.maxMultiShips);
       body.put("globalSegmentHours", config.query.globalSegmentHours);
+      body.put("defaultRealtimeWindowMinutes", config.query.defaultRealtimeWindowMinutes);
       body.put("amapKey", configService.envOrDefault("VITE_AMAP_KEY", ""));
       body.put("amapSecurityJsCode", configService.envOrDefault("VITE_AMAP_SECURITY_JS_CODE", ""));
       return body;
@@ -62,6 +69,22 @@ public class ApiController {
     return trace("/api/realtime/latest", () -> {
       TimeWindow timeWindow = realtimeWindow(start, end, timePoint, minutes);
       return realtimeService.latestResponse(timeWindow);
+    });
+  }
+
+  @GetMapping("/api/realtime/viewport")
+  public Map<String, Object> realtimeViewport(@RequestParam(required = false) String start, @RequestParam(required = false) String end,
+      @RequestParam(required = false) String timePoint, @RequestParam(required = false) String minutes,
+      @RequestParam String west, @RequestParam String south, @RequestParam String east, @RequestParam String north,
+      @RequestParam(required = false) String zoom, @RequestParam(required = false) String types) {
+    return trace("/api/realtime/viewport", () -> {
+      TimeWindow timeWindow = realtimeWindow(start, end, timePoint, minutes);
+      BBox bbox = bboxOrNull(west, south, east, north);
+      if (bbox == null) {
+        throw new IllegalArgumentException("bbox parameters are required");
+      }
+      int zoomValue = realtimeService.validateZoom(zoom);
+      return realtimeService.viewportResponse(timeWindow, bbox, zoomValue, parseTypeFilter(types));
     });
   }
 
@@ -140,7 +163,7 @@ public class ApiController {
   @PostMapping("/api/stats/multi-track-points")
   public Map<String, Object> multiTrackPointStats(@RequestBody MultiTrackRequest body) {
     return trace("/api/stats/multi-track-points", () -> {
-      List<String> shipIds = body.shipIds == null ? List.of() : body.shipIds.stream().limit(config.query.maxMultiShips).toList();
+      List<String> shipIds = limitedShipIds(body.shipIds);
       if (shipIds.isEmpty()) {
         throw new IllegalArgumentException("shipIds parameter is required");
       }
@@ -153,11 +176,16 @@ public class ApiController {
   public Map<String, Object> density(@RequestParam(required = false) String start, @RequestParam(required = false) String end,
       @RequestParam(required = false) String timePoint, @RequestParam(required = false) String minutes,
       @RequestParam String west, @RequestParam String south, @RequestParam String east, @RequestParam String north,
-      @RequestParam(required = false) String zoom) {
+      @RequestParam(required = false) String zoom, @RequestParam(required = false) String stepMinutes) {
     return trace("/api/analysis/density", () -> {
       TimeWindow time = realtimeWindow(start, end, timePoint, minutes);
       BBox bbox = bbox(west, south, east, north);
-      return Map.of("items", repository.density(time.start(), time.end(), bbox, realtimeService.validateZoom(zoom)));
+      return Map.of("items", repository.density(
+          time.start(),
+          time.end(),
+          bbox,
+          realtimeService.validateZoom(zoom),
+          parseDensityStepMinutes(stepMinutes)));
     });
   }
 
@@ -184,27 +212,25 @@ public class ApiController {
   @GetMapping("/api/tracks/candidates")
   public Map<String, Object> candidates(@RequestParam String start, @RequestParam String end, @RequestParam String west,
       @RequestParam String south, @RequestParam String east, @RequestParam String north,
-      @RequestParam(required = false) String page, @RequestParam(required = false) String pageSize,
-      @RequestParam(required = false) String shipTypes) {
+      @RequestParam(required = false) String page, @RequestParam(required = false) String pageSize) {
     return trace("/api/tracks/candidates", () -> {
       TimeWindow time = realtimeService.validateTimeWindow(start, end);
       int pageValue = page == null || page.isBlank() ? 1 : Integer.parseInt(page);
       int pageSizeValue = pageSize == null || pageSize.isBlank() ? 100 : Integer.parseInt(pageSize);
-      List<String> shipTypeValues = parseShipTypes(shipTypes);
-      return Map.of("items", repository.candidates(time.start(), time.end(), bbox(west, south, east, north), pageValue, pageSizeValue, shipTypeValues));
+      return Map.of("items", repository.candidates(time.start(), time.end(), bbox(west, south, east, north), pageValue, pageSizeValue));
     });
   }
 
   @PostMapping("/api/tracks/multi")
   public Map<String, Object> multi(@RequestBody MultiTrackRequest body) {
     return trace("/api/tracks/multi", () -> {
-      List<String> shipIds = body.shipIds == null ? List.of() : body.shipIds.stream().limit(config.query.maxMultiShips).toList();
+      List<String> shipIds = limitedShipIds(body.shipIds);
       if (shipIds.isEmpty()) {
         throw new IllegalArgumentException("shipIds parameter is required");
       }
       TimeWindow time = realtimeService.validateTimeWindow(body.start, body.end);
       int zoom = body.zoom == null ? config.map.defaultZoom : body.zoom;
-      return Map.of("items", repository.trackRows(
+      return compactTrackRows(repository.trackRows(
           shipIds,
           time.start(),
           time.end(),
@@ -222,7 +248,7 @@ public class ApiController {
       @RequestParam(required = false) String samplingMode, @RequestParam(required = false) String bucketSeconds) {
     return trace("/api/tracks/global-segment", () -> {
       TimeWindow time = realtimeService.globalWindowFromParams(timePoint, hours);
-      return Map.of("items", repository.globalSegment(
+      return compactTrackRows(repository.globalSegment(
           time.start(),
           time.end(),
           realtimeService.validateZoom(zoom),
@@ -254,18 +280,14 @@ public class ApiController {
     return realtimeService.realtimeWindowFromParams(null, null);
   }
 
-  private List<String> parseShipTypes(String shipTypes) {
-    if (shipTypes == null || shipTypes.isBlank()) {
-      return List.of("ais");
+  private Set<String> parseTypeFilter(String types) {
+    if (types == null || types.isBlank()) {
+      return Set.of();
     }
-    List<String> values = new java.util.ArrayList<>();
-    for (String value : shipTypes.split(",")) {
-      String normalized = value == null ? "" : value.trim().toLowerCase();
-      if (("ais".equals(normalized) || "radar".equals(normalized)) && !values.contains(normalized)) {
-        values.add(normalized);
-      }
-    }
-    return values.isEmpty() ? List.of("ais") : values;
+    return Arrays.stream(types.split(","))
+        .map(String::trim)
+        .filter(value -> !value.isBlank())
+        .collect(Collectors.toSet());
   }
 
   private String normalizeSamplingMode(String samplingMode) {
@@ -284,6 +306,51 @@ public class ApiController {
       return null;
     }
     return Math.max(1, Integer.parseInt(bucketSeconds));
+  }
+
+  private Integer parseDensityStepMinutes(String stepMinutes) {
+    if (stepMinutes == null || stepMinutes.isBlank()) {
+      return null;
+    }
+    int value = Integer.parseInt(stepMinutes);
+    if (value < 1) {
+      throw new IllegalArgumentException("density step minutes is invalid");
+    }
+    return value;
+  }
+
+  private List<String> limitedShipIds(List<String> shipIds) {
+    if (shipIds == null) {
+      return List.of();
+    }
+    return shipIds.stream()
+        .filter(value -> value != null && !value.isBlank())
+        .map(String::trim)
+        .distinct()
+        .limit(config.query.maxMultiShips)
+        .toList();
+  }
+
+  private Map<String, Object> compactTrackRows(List<Map<String, Object>> items) {
+    List<List<Object>> rows = items.stream().map(item -> {
+      List<Object> row = new ArrayList<>(TRACK_COMPACT_FIELDS.size());
+      row.add(String.valueOf(item.getOrDefault("shipId", "")));
+      row.add(String.valueOf(item.getOrDefault("shipName", "")));
+      row.add(valueOrZero(item.get("lng")));
+      row.add(valueOrZero(item.get("lat")));
+      row.add(valueOrZero(item.get("speed")));
+      row.add(valueOrZero(item.get("heading")));
+      row.add(valueOrZero(item.get("isAis")));
+      row.add(valueOrZero(item.get("shipType")));
+      row.add(String.valueOf(item.getOrDefault("time", "")));
+      row.add(String.valueOf(item.getOrDefault("bucketStart", "")));
+      return row;
+    }).toList();
+    return Map.of("compact", true, "fields", TRACK_COMPACT_FIELDS, "items", rows);
+  }
+
+  private Object valueOrZero(Object value) {
+    return value == null ? 0 : value;
   }
 
   private <T> T trace(String endpoint, Supplier<T> action) {

@@ -23,7 +23,10 @@
       <main class="workspace">
         <header class="topbar">
           <h1>船舶态势与轨迹回放</h1>
-          <div id="status" class="status">准备加载地图</div>
+          <div class="topbar-meta">
+            <button id="stats-toggle" class="stats-toggle" type="button" aria-pressed="true">统计：开</button>
+            <div id="status" class="status">准备加载地图</div>
+          </div>
         </header>
         <button id="api-trace-toggle" class="api-trace-toggle hidden" type="button">接口耗时</button>
         <div id="api-trace" class="api-trace hidden" aria-live="polite"></div>
@@ -40,8 +43,6 @@
                   <span>已加载 <em id="candidate-loaded-pages">0</em> 页<em id="candidate-total-loaded">0</em> 艘，已选 <em id="candidate-selected-count">0</em> 艘，查询耗时 <em id="candidate-query-elapsed">--</em></span>
                 </div>
                 <div class="candidate-header-actions">
-                  <label class="candidate-toggle"><input id="candidate-type-ais" type="checkbox" checked /> AIS</label>
-                  <label class="candidate-toggle"><input id="candidate-type-radar" type="checkbox" /> 雷达</label>
                   <button id="candidate-load-track" class="candidate-play primary" type="button">加载轨迹</button>
                   <button id="candidate-close" class="candidate-close" type="button">收起</button>
                 </div>
@@ -116,32 +117,49 @@
             <section id="time-section" class="panel-section hidden">
               <h3>时间范围</h3>
               <div class="time-inline">
-                <label>开始<input id="start" type="datetime-local" value="2026-04-17T00:00" /></label>
-                <label>结束<input id="end" type="datetime-local" value="2026-04-19T23:59" /></label>
+                <label>开始<input id="start" type="datetime-local" step="1" value="2026-05-24T00:00:00" /></label>
+                <label>结束<input id="end" type="datetime-local" step="1" value="2026-05-24T23:59:59" /></label>
               </div>
             </section>
             <section id="realtime-panel" class="panel-section mode-panel">
-              <label>展示类型
-                <select id="realtime-type">
-                  <option value="ais" selected>AIS 船只</option>
-                  <option value="nonais">雷达船</option>
-                  <option value="all">全部</option>
-                </select>
-              </label>
+              <fieldset class="type-filter">
+                <legend>展示类型</legend>
+                <label><input data-realtime-type="ais" type="checkbox" checked /> AIS</label>
+                <label><input data-realtime-type="radar" type="checkbox" checked /> 雷达</label>
+                <label><input data-realtime-type="beidou" type="checkbox" checked /> 北斗</label>
+                <label><input data-realtime-type="aisbeidou" type="checkbox" checked /> AIS+北斗</label>
+                <label><input data-realtime-type="aisradar" type="checkbox" checked /> AIS+雷达</label>
+                <label><input data-realtime-type="beidouradar" type="checkbox" checked /> 北斗+雷达</label>
+                <label><input data-realtime-type="beidouradarais" type="checkbox" checked /> 三源融合</label>
+              </fieldset>
               <div class="time-grid">
                 <label>时间点<input id="realtime-point" type="datetime-local" step="1" /></label>
-                <label>前推分钟<input id="realtime-minutes" type="number" min="1" step="1" value="10" /></label>
+                <label>前推分钟<input id="realtime-minutes" type="number" min="1" step="1" value="30" /></label>
+              </div>
+              <div class="selected-ships-row">
+                <span>已选 <strong id="realtime-selected-count">0</strong> 艘</span>
+                <button id="realtime-multi-play" type="button">多船回放</button>
+                <button id="realtime-clear-selected" type="button">清空选择</button>
               </div>
               <button id="load-latest" class="primary">刷新全部最新船位</button>
               <p>服务端按“时间点 - 前推分钟”构造实时窗口，预热每艘船最新位置的内存缓存，缓存命中后一次性返回全部最新船位。</p>
             </section>
             <section id="analysis-panel" class="panel-section mode-panel hidden">
               <div class="time-grid">
-                <label>时间点<input id="analysis-point" type="datetime-local" step="1" /></label>
-                <label>前推分钟<input id="analysis-minutes" type="number" min="1" step="1" value="10" /></label>
+                <label>开始时间<input id="analysis-start" type="datetime-local" step="1" value="2026-05-24T00:00:00" /></label>
+                <label>结束时间<input id="analysis-end" type="datetime-local" step="1" value="2026-05-24T23:59:59" /></label>
+                <label>步进分钟<input id="analysis-step-minutes" type="number" min="1" step="1" value="30" /></label>
               </div>
               <button id="load-density" class="primary">按当前视野生成热力</button>
-              <p>服务端按 bbox、时间窗和 zoom 聚合密度点，不返回海量原始点。</p>
+              <div id="analysis-progress" class="analysis-progress hidden">
+                <div class="analysis-progress-head">
+                  <span>热力帧</span>
+                  <strong id="analysis-frame-label">0/0</strong>
+                </div>
+                <input id="analysis-progress-range" type="range" min="0" max="0" value="0" disabled />
+                <p id="analysis-frame-time">--</p>
+              </div>
+              <p>前端按时间片逐帧请求热力数据，服务端只返回当前时间片的静态密度点，避免一次返回过多桶数据。</p>
             </section>
             <section id="single-panel" class="panel-section mode-panel hidden">
               <h3>船舶选择</h3>
@@ -152,7 +170,7 @@
               </div>
               <div class="time-grid">
                 <label>向后小时<input id="single-after-hours" type="number" min="0" step="1" value="0" /></label>
-                <div></div>
+                <label>抖动抑制米数<input id="single-jitter-meters" type="number" min="0" step="1" value="0" /></label>
               </div>
               <p>默认按实时位置带入的时间点，向前 12 小时、向后 0 小时回放，可按需要修改。</p>
               <div class="button-row">
@@ -171,7 +189,21 @@
                 <label>时间点<input id="global-point" type="datetime-local" step="1" /></label>
                 <label>向前小时<input id="global-hours" type="number" min="1" step="1" value="1" /></label>
               </div>
-              <button id="load-global" class="primary">加载全域轨迹</button>
+              <fieldset class="type-filter">
+                <legend>信号源</legend>
+                <label><input data-global-type="ais" type="checkbox" checked /> AIS</label>
+                <label><input data-global-type="radar" type="checkbox" checked /> 雷达</label>
+                <label><input data-global-type="beidou" type="checkbox" checked /> 北斗</label>
+                <label><input data-global-type="aisbeidou" type="checkbox" checked /> AIS+北斗</label>
+                <label><input data-global-type="aisradar" type="checkbox" checked /> AIS+雷达</label>
+                <label><input data-global-type="beidouradar" type="checkbox" checked /> 北斗+雷达</label>
+                <label><input data-global-type="beidouradarais" type="checkbox" checked /> 三源融合</label>
+              </fieldset>
+              <div class="button-row">
+                <button id="load-global" class="primary">加载全域轨迹</button>
+                <label class="performance-toggle"><input id="global-ws-mode" type="checkbox" checked /> WS 模式</label>
+                <label class="performance-toggle"><input id="global-show-tracks" type="checkbox" /> 展示轨迹</label>
+              </div>
             </section>
             <section id="player" class="panel-section player hidden">
               <h3>播放控制</h3>
@@ -193,14 +225,18 @@
                   <select id="track-sampling-mode">
                     <option value="auto" selected>自动抽稀</option>
                     <option value="raw">原始</option>
-                    <option value="manual">人工指定桶秒数</option>
+                    <option value="manual">人工指定抽稀粒度</option>
                   </select>
                 </label>
                 <div id="track-sampling-bucket-group" class="hidden">
-                  <label>桶秒数
-                    <input id="track-sampling-bucket" type="number" min="1" step="1" value="60" />
+                  <label>抽稀粒度
+                    <select id="track-sampling-bucket">
+                      <option value="60" selected>1 分钟</option>
+                      <option value="300">5 分钟</option>
+                      <option value="1800">30 分钟</option>
+                    </select>
                   </label>
-                  <p id="track-sampling-hint" class="sampling-hint">仅人工指定桶秒数时生效。</p>
+                  <p id="track-sampling-hint" class="sampling-hint">仅人工指定抽稀粒度时生效。</p>
                 </div>
                 <label class="performance-toggle"><input id="playback-performance-mode" type="checkbox" checked /> 性能模式</label>
               </div>

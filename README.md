@@ -22,35 +22,24 @@ Copy-Item .env.example .env
 
 ```text
 PORT=3001
-CLICKHOUSE_JDBC_URL=jdbc:clickhouse://127.0.0.1:8123/default
+CLICKHOUSE_JDBC_URL=jdbc:clickhouse://10.100.1.23:8461/track
 CLICKHOUSE_USER=default
-CLICKHOUSE_PASSWORD=
+CLICKHOUSE_PASSWORD=123456
 ```
 
 ClickHouse 表名、字段名、查询上限、地图默认中心点等配置位于 `config/ship-track.config.json`。
 
-前端使用项目内 `public/vendor/openlayers/` 中的 OpenLayers 文件，不需要高德 Web JS API Key。默认底图使用高德 XYZ 瓦片 `webrd01-04.is.autonavi.com/appmaptile`。
+前端使用项目内 `public/vendor/openlayers/` 中的 OpenLayers 文件，不需要高德 Web JS API Key。默认底图使用内网离线高德 XYZ 瓦片 `10.100.1.3/GeoData_mbs/map/GaodeMap/img/{z}/{x}/{y}.png`。
 
 ## 抽稀表
 
-原始轨迹仍写入 `tb_ais_event_simple_info`。轨迹查询默认优先使用多级抽稀表：
+轨迹查询依赖 ClickHouse 已维护的原始表、固定抽稀表和空间索引表：
 
-- `tb_ship_track_simplified`：存储 L0/L1/L2/L3 抽稀轨迹。
-- `tb_ship_simplify_offset`：记录每条船处理进度。
+- `tb_ais_track_raw`：原始轨迹。
+- `tb_ais_track_thin`：按 `60`、`300`、`1800` 秒固定粒度抽稀后的轨迹。
+- `tb_ship_bucket_index`：候选船框选使用的船舶时空索引。
 
-建表 SQL 位于项目内：
-
-```powershell
-# 在 ClickHouse 中执行 db/simplified-tracks.sql
-```
-
-已有历史原始轨迹需要显式回填：
-
-```powershell
-.\scripts\backfill-simplified-tracks.ps1
-```
-
-服务启动后会每 5 分钟按船增量读取原始表，执行 SED-RDP 抽稀并写入抽稀表。当前不处理 AIS 乱序、补串和迟到数据；offset 只按每船最后处理到的 `event_time` 单调前进。
+`tb_ais_track_thin` 和 `tb_ship_bucket_index` 由 ClickHouse 物化视图维护。项目内旧 SED-RDP 抽稀任务默认关闭，页面轨迹加载不再依赖 `tb_ship_track_simplified` 或 offset 回填任务。
 
 ## 运行
 
@@ -91,14 +80,18 @@ http://127.0.0.1:3001
 - `GET /api/tracks/global-segment`
 - `GET /ws/realtime` WebSocket 升级连接
 
-实时最新船位接口继续返回 compact 结构：`fields` 描述字段顺序，`items` 为二维数组，顺序为 `shipId, shipName, lng, lat, speed, heading, time, isAis`。
+实时最新船位接口继续返回 compact 结构：`fields` 描述字段顺序，`items` 为二维数组，顺序为 `shipId, shipName, lng, lat, speed, heading, time, isAis, shipType`。
+
+未指定实时窗口时，服务固定使用 `2026-05-15 23:30:00` 到 `2026-05-16 00:00:00`，并在启动时优先将该窗口最新船位加载到内存。默认缓存预热失败时接口返回空缓存结果，不把首屏请求回落到慢查询。
 
 轨迹接口说明：
 
-- `/api/tracks/single`、`/api/tracks/multi`、`/api/tracks/global-segment` 在 `auto/manual` 模式下先按 zoom 选择抽稀层级并查询 `tb_ship_track_simplified`。
-- 抽稀表无数据或抽稀表查询失败时，会 fallback 到原有 bucket 分组查询。
-- `samplingMode=raw` 仍查询原始表。
-- 多船回放只绘制当前播放时刻向前 30 分钟轨迹；全域回放只显示船位置，不绘制轨迹线；实时位置点击船会自动绘制该船 1 小时轨迹。
+- `/api/tracks/single`、`/api/tracks/multi` 在 `auto/manual` 模式下查询 `tb_ais_track_thin` 的固定 `bucket_size`。
+- `/api/tracks/multi` 与 `/api/tracks/global-segment` 返回 compact 轨迹结构；全域接口默认固定使用 `bucket_size=1800` 的船位帧，不返回整段全域轨迹线。
+- 人工抽稀粒度固定为 `60`、`300`、`1800` 秒，自动模式按 zoom 选择其中一个粒度。
+- 只有单船回放的 `samplingMode=raw` 查询 `tb_ais_track_raw`；多船和全域回放始终留在抽稀表链路。
+- 多船回放先绘制整段半透明轨迹，再将已播放部分叠成不透明轨迹；全域回放只显示船位置，不绘制轨迹线；实时位置点击船会进入多选，详情仍可发起单船回放。
+- 热力图从 `tb_ais_track_thin` 的 `bucket_size=300` 数据聚合，统计类指标在前端延后加载，避免争抢实时船位首屏链路。
 
 ## 可选索引
 

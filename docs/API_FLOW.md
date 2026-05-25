@@ -32,7 +32,7 @@ flowchart TD
 | `ApiController` | 接收 HTTP 请求，解析 query/body，校验时间窗口、bbox、zoom，调用服务或仓库并组织响应。 |
 | `RealtimeService` | 推算实时窗口和全域窗口，维护实时最新船位缓存，读取数据库统计缓存。 |
 | `TrackRepository` | 根据业务场景生成 ClickHouse SQL，处理抽稀、统计聚合、候选船查询。 |
-| `TrackSimplificationService` | 每 5 分钟按船增量读取原始轨迹，执行 SED-RDP，写入多级抽稀表和 offset 表。 |
+| `TrackSimplificationService` | 旧 SED-RDP 抽稀任务，当前默认关闭；页面主链路使用 ClickHouse 固定抽稀表。 |
 | `ClickHouseHttpClient` | 将 SQL 和参数通过 ClickHouse HTTP 接口发送，追加 `FORMAT JSONEachRow`，解析返回行；批量写入时使用 `INSERT ... FORMAT JSONEachRow`。 |
 | `ApiExceptionHandler` | 捕获异常并返回统一 `{ "error": "..." }` JSON。 |
 
@@ -51,19 +51,13 @@ flowchart TD
   H --> J["ApiExceptionHandler 转换错误响应"]
 ```
 
-抽稀表生成流程：
+固定抽稀数据来源：
 
 ```mermaid
 flowchart TD
-  A["TrackSimplificationService 定时任务或回填 runner"] --> B["nextShipIds 查询原始表最大时间和 offset"]
-  B --> C{"是否存在待处理船舶?"}
-  C -->|否| D["结束本轮"]
-  C -->|是| E["按船读取 offset 之后的原始轨迹"]
-  E --> F["SED-RDP 生成 L0/L1/L2/L3"]
-  F --> G["ClickHouseHttpClient.insertJsonEachRow"]
-  G --> H["写入 tb_ship_track_simplified"]
-  H --> I["写入 tb_ship_simplify_offset"]
-  I --> B
+  A["tb_ais_track_raw 原始轨迹写入"] --> B["ClickHouse 物化视图"]
+  B --> C["tb_ais_track_thin 固定 bucket_size 轨迹"]
+  B --> D["tb_ship_bucket_index 时空索引"]
 ```
 
 抽稀查询通用流程：
@@ -72,13 +66,10 @@ flowchart TD
 flowchart TD
   A["single/multi/global 轨迹查询"] --> B["normalize samplingMode"]
   B --> C{"samplingMode == raw?"}
-  C -->|是| D["查询 tb_ais_event_simple_info 原始轨迹"]
-  C -->|否| E["按 zoom 映射 simplify_level"]
-  E --> F["优先查询 tb_ship_track_simplified"]
-  F --> G{"抽稀表有数据?"}
-  G -->|是| H["返回抽稀表轨迹点"]
-  G -->|否| I["fallback 到原有 bucket GROUP BY 查询"]
-  I --> J["返回 bucket 抽稀轨迹点"]
+  C -->|是| D["查询 tb_ais_track_raw 原始轨迹"]
+  C -->|否| E["选择固定 bucket_size"]
+  E --> F["查询 tb_ais_track_thin"]
+  F --> G["返回固定抽稀轨迹点"]
 ```
 
 ## 2. `GET /api/config/map`
@@ -400,7 +391,7 @@ flowchart TD
 
 ## 10. `GET /api/analysis/density`
 
-后台职责：按时间窗口、bbox 和地图缩放级别聚合密度网格，供热力图展示。
+后台职责：按时间窗口、bbox 和地图缩放级别聚合单帧密度网格；态势分析由前端按时间片逐帧请求。
 
 ```mermaid
 flowchart TD
@@ -408,7 +399,7 @@ flowchart TD
   B --> C["realtimeWindow(...) 得到时间窗口"]
   C --> D["bbox(west,south,east,north) 校验范围"]
   D --> E["RealtimeService.validateZoom"]
-  E --> F["TrackRepository.density"]
+  E --> F["TrackRepository.density 静态聚合"]
   F --> G["densityGridSizeDegrees 按 zoom 计算网格"]
   G --> H["生成 GROUP BY lng/lat 网格 SQL"]
   H --> I["ClickHouseHttpClient.query"]
@@ -420,7 +411,8 @@ flowchart TD
 1. 时间窗口规则与实时接口一致。
 2. bbox 是必填参数，缺失或范围非法会抛出异常。
 3. `densityGridSizeDegrees` 根据 `zoom` 返回网格粒度。
-4. SQL 按网格中心点聚合 `count()` 和 `uniqCombined64(shipId)`。
+4. SQL 只按网格中心点聚合 `count()` 和 `uniqCombined64(shipId)`。
+5. 前端如果要播放多帧热力，按自己的时间步进逐帧请求该接口。
 
 主要参与类/方法：
 
@@ -433,11 +425,12 @@ flowchart TD
 性能注意点或特殊逻辑：
 
 - bbox 必填，避免全域热力查询影响船只加载速度。
+- 态势分析播放由前端串行请求控制，后端只负责返回当前时间片的静态热力点。
 - 返回数量受 `query.maxDensityCells` 限制。
 
 ## 11. `GET /api/tracks/single`
 
-后台职责：查询单船轨迹，支持原始点和抽稀点返回。`raw` 查询原始表；`auto/manual` 优先查询抽稀表，空结果时回退到原有 bucket 查询。
+后台职责：查询单船轨迹，支持原始点和抽稀点返回。`raw` 查询原始表；`auto/manual` 查询固定抽稀表。
 
 ```mermaid
 flowchart TD
@@ -451,15 +444,11 @@ flowchart TD
   H --> I["resolveSamplingPlan"]
   I --> J{"samplingMode == raw?"}
   J -->|是| K["生成原始点 SQL，PREWHERE shipId"]
-  J -->|否| L["simplifyLevelForZoom"]
-  L --> M["查询 tb_ship_track_simplified"]
-  M --> N{"抽稀表有数据?"}
-  N -->|是| O["返回抽稀点"]
-  N -->|否| P["计算或使用 bucketSeconds"]
-  P --> Q["生成按 bucket GROUP BY 的 fallback SQL"]
+  J -->|否| L["选择固定 bucket_size"]
+  L --> M["查询 tb_ais_track_thin"]
   K --> R["ClickHouseHttpClient.query"]
-  Q --> R
-  R --> O
+  M --> R
+  R --> O["返回轨迹点"]
   D --> S["ApiExceptionHandler 返回 error JSON"]
 ```
 
@@ -468,7 +457,7 @@ flowchart TD
 1. `shipId` 为空直接抛出异常。
 2. 时间窗口必须合法，`zoom` 必须在 3 到 18。
 3. `samplingMode` 非法时归一化为 `auto`。
-4. `raw` 模式返回原始轨迹点；`auto/manual` 模式先按 zoom 查询抽稀表，抽稀表无数据时按时间桶聚合返回 fallback 抽稀点。
+4. `raw` 模式返回原始轨迹点；`auto/manual` 模式查询 `bucket_size=60/300/1800` 的固定抽稀点。
 
 主要参与类/方法：
 
@@ -476,14 +465,14 @@ flowchart TD
 | --- | --- |
 | `ApiController` | `single(...)`, `normalizeSamplingMode(...)`, `parseBucketSeconds(...)` |
 | `RealtimeService` | `validateTimeWindow(...)`, `validateZoom(...)` |
-| `TrackRepository` | `singleTrackRows(...)`, `simplifyLevelForZoom(...)`, `resolveSamplingPlan(...)`, `calculateBucketSizeSeconds(...)` |
+| `TrackRepository` | `singleTrackRows(...)`, `bucketSizeForZoom(...)`, `resolveSamplingPlan(...)` |
 
 性能注意点或特殊逻辑：
 
 - 默认使用 `auto` 抽稀，目标是控制单船返回点数。
 - `raw` 模式可能返回大量点，应只用于需要原始明细的场景。
 - 单船 SQL 使用 `PREWHERE shipId`。
-- 抽稀表未建或查询失败时会回退到原有 bucket 查询，避免接口不可用。
+- 默认抽稀路径避免从原始表再做 bucket 聚合，控制船只加载查询成本。
 
 ## 12. `GET /api/tracks/candidates`
 
@@ -494,17 +483,11 @@ flowchart TD
   A["GET /api/tracks/candidates"] --> B["ApiController.candidates"]
   B --> C["RealtimeService.validateTimeWindow"]
   C --> D["解析 page/pageSize"]
-  D --> E["parseShipTypes"]
-  E --> F["bbox(west,south,east,north) 校验"]
+  D --> F["bbox(west,south,east,north) 校验"]
   F --> G["TrackRepository.candidates"]
   G --> H["pageSize 按 maxCandidateBatchSize 限制"]
-  H --> I["normalizeShipTypes"]
-  I --> J["生成 bucketIndex 聚合 SQL"]
-  J --> K{"shipTypes 是否单一?"}
-  K -->|是| L["追加 shipType WHERE 过滤"]
-  K -->|否| M["不过滤类型"]
-  L --> N["ClickHouseHttpClient.query"]
-  M --> N
+  H --> J["bucketIndex 聚合空间候选和点数"]
+  J --> N["ClickHouseHttpClient.query"]
   N --> O["返回候选船 items"]
 ```
 
@@ -512,16 +495,16 @@ flowchart TD
 
 1. 强制校验时间窗口和 bbox。
 2. `page` 默认 1，`pageSize` 默认 100，并受配置上限限制。
-3. `shipTypes` 支持 `ais`、`radar`，非法或空值默认 `ais`。
-4. 查询使用 `config.tables.bucketIndex` 配置的桶索引表。
+3. 空间候选和点数查询只使用 `config.tables.bucketIndex` 配置的桶索引表。
+4. 候选阶段不补船型，避免为了候选列表额外读取轨迹表；已选船轨迹查询再返回船型字段。
 
 主要参与类/方法：
 
 | 类 | 方法 |
 | --- | --- |
-| `ApiController` | `candidates(...)`, `parseShipTypes(...)`, `bbox(...)` |
+| `ApiController` | `candidates(...)`, `bbox(...)` |
 | `RealtimeService` | `validateTimeWindow(...)` |
-| `TrackRepository` | `candidates(...)`, `normalizeShipTypes(...)` |
+| `TrackRepository` | `candidates(...)` |
 
 性能注意点或特殊逻辑：
 
@@ -531,7 +514,7 @@ flowchart TD
 
 ## 13. `POST /api/tracks/multi`
 
-后台职责：查询多艘船轨迹，支持原始点和抽稀点返回。`raw` 查询原始表；`auto/manual` 优先查询抽稀表，空结果时回退到原有 bucket 查询。
+后台职责：查询多艘船轨迹，支持原始点和抽稀点返回。`raw` 查询原始表；`auto/manual` 查询固定抽稀表。
 
 ```mermaid
 flowchart TD
@@ -547,15 +530,11 @@ flowchart TD
   J --> K["resolveSamplingPlan"]
   K --> L{"samplingMode == raw?"}
   L -->|是| M["生成原始多船 SQL"]
-  L -->|否| N["simplifyLevelForZoom"]
-  N --> O["查询 tb_ship_track_simplified"]
-  O --> P{"抽稀表有数据?"}
-  P -->|是| Q["返回抽稀点"]
-  P -->|否| R["计算或使用 bucketSeconds"]
-  R --> S["生成 shipId + bucket GROUP BY fallback SQL"]
+  L -->|否| N["选择固定 bucket_size"]
+  N --> O["查询 tb_ais_track_thin"]
   M --> T["ClickHouseHttpClient.query"]
-  S --> T
-  T --> Q
+  O --> T
+  T --> Q["返回轨迹点"]
   F --> U["ApiExceptionHandler 返回 error JSON"]
 ```
 
@@ -563,7 +542,7 @@ flowchart TD
 
 1. `shipIds` 最多保留 `config.query.maxMultiShips` 个。
 2. `zoom` 为空时使用 `config.map.defaultZoom`；当前该接口未调用 `validateZoom`。
-3. `TrackRepository.trackRows` 根据抽稀计划生成原始 SQL、抽稀表 SQL 或 fallback 桶聚合 SQL。
+3. `TrackRepository.trackRows` 根据抽稀计划生成原始 SQL 或固定抽稀表 SQL。
 4. 请求体类中存在 `bbox` 字段，但当前控制器传给仓库的是 `null`，因此该接口实际不按 bbox 过滤。
 
 主要参与类/方法：
@@ -572,7 +551,7 @@ flowchart TD
 | --- | --- |
 | `ApiController` | `multi(...)`, `normalizeSamplingMode(...)` |
 | `RealtimeService` | `validateTimeWindow(...)` |
-| `TrackRepository` | `trackRows(...)`, `resolveSamplingPlan(...)`, `calculateBucketSizeSeconds(...)` |
+| `TrackRepository` | `trackRows(...)`, `resolveSamplingPlan(...)`, `bucketSizeForZoom(...)` |
 
 性能注意点或特殊逻辑：
 
@@ -583,7 +562,7 @@ flowchart TD
 
 ## 14. `GET /api/tracks/global-segment`
 
-后台职责：查询全域回放时间片段内的轨迹数据，支持原始点和抽稀点返回。`raw` 查询原始表；`auto/manual` 优先查询抽稀表，空结果时回退到原有 bucket 查询。
+后台职责：查询全域回放时间片段内的抽稀位置帧。全域回放固定留在抽稀表链路，传入 `raw` 也不扫描原始表。
 
 ```mermaid
 flowchart TD
@@ -600,21 +579,18 @@ flowchart TD
   J --> K["resolveSamplingPlan"]
   K --> L{"samplingMode == raw?"}
   L -->|是| M["生成全域原始点 SQL"]
-  L -->|否| N["simplifyLevelForZoom"]
-  N --> O["查询 tb_ship_track_simplified"]
-  O --> P{"抽稀表有数据?"}
-  P -->|是| Q["返回全域抽稀点"]
-  P -->|否| R["生成 shipId + bucket GROUP BY fallback SQL"]
+  L -->|否| N["选择固定 bucket_size"]
+  N --> O["查询 tb_ais_track_thin"]
   M --> S["ClickHouseHttpClient.query"]
-  R --> S
-  S --> Q
+  O --> S
+  S --> Q["返回全域轨迹点"]
 ```
 
 关键处理步骤：
 
 1. `timePoint` 为空时通过 `watermark()` 取数据库最大时间。
 2. `hours` 为空时使用配置 `query.globalSegmentHours`。
-3. `globalSegment` 在 `auto/manual` 下先按 zoom 查询抽稀表，抽稀表无数据时使用 `query.maxGlobalSegmentPoints` 参与 fallback bucket 粒度计算。
+3. `globalSegment` 在 `auto/manual` 下按 zoom 选择固定抽稀粒度。
 4. 返回多艘船的轨迹点，按时间和船舶编号排序。
 
 主要参与类/方法：

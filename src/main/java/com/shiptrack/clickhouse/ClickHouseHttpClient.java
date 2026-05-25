@@ -111,7 +111,7 @@ public class ClickHouseHttpClient {
     }
     long dbStart = System.nanoTime();
     try {
-      HttpResponse<String> response = httpClient.send(request.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+      HttpResponse<String> response = sendWithQueryRetry(request.build(), wrapConnectionError, uri, timeoutSeconds, maxExecutionTime);
       requestMetricsService.recordDbElapsed(System.nanoTime() - dbStart);
       if (response.statusCode() < 200 || response.statusCode() >= 300) {
         throw new ClickHouseException(response.body());
@@ -132,6 +132,34 @@ public class ClickHouseHttpClient {
       log.warn("ClickHouse request interrupted endpoint={} timeoutSeconds={} maxExecutionTime={}", uri, timeoutSeconds, maxExecutionTime, error);
       throw new ClickHouseException("ClickHouse request interrupted", error);
     }
+  }
+
+  private HttpResponse<String> sendWithQueryRetry(HttpRequest request, boolean queryRequest, URI uri, int timeoutSeconds, int maxExecutionTime)
+      throws IOException, InterruptedException {
+    try {
+      return httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+    } catch (IOException error) {
+      if (!queryRequest || !isConnectionClosedBeforeHeaders(error)) {
+        throw error;
+      }
+      log.warn("ClickHouse closed the HTTP connection before response headers; retrying query once. endpoint={} timeoutSeconds={} maxExecutionTime={}",
+          uri, timeoutSeconds, maxExecutionTime);
+      return httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+    }
+  }
+
+  private boolean isConnectionClosedBeforeHeaders(Throwable error) {
+    Throwable current = error;
+    while (current != null) {
+      String message = current.getMessage();
+      if (message != null && (message.contains("HTTP/1.1 header parser received no bytes")
+          || message.contains("header parser received no bytes")
+          || message.contains("unexpected EOF"))) {
+        return true;
+      }
+      current = current.getCause();
+    }
+    return false;
   }
 
   private String queryString(Map<String, Object> params, int maxExecutionTime) {

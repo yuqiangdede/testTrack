@@ -1,7 +1,9 @@
 package com.shiptrack;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -38,6 +40,34 @@ class ApiControllerTest {
 
     assertThat(result).containsEntry("trackPoints", 123L).containsEntry("ships", 45L);
     verify(repository, never()).databaseStats();
+  }
+
+  @Test
+  void realtimeViewportUsesRealtimeMemoryService() {
+    ShipConfigService configService = mock(ShipConfigService.class);
+    TrackRepository repository = mock(TrackRepository.class);
+    RealtimeService realtimeService = mock(RealtimeService.class);
+    when(configService.config()).thenReturn(new ShipTrackConfig());
+    when(realtimeService.realtimeWindowFromParams(anyString(), anyString()))
+        .thenReturn(new TimeWindow("2026-04-17 00:00:00", "2026-04-17 00:30:00"));
+    when(realtimeService.validateZoom("12")).thenReturn(12);
+    when(realtimeService.viewportResponse(
+        any(TimeWindow.class),
+        any(BBox.class),
+        anyInt(),
+        any()))
+        .thenReturn(Map.of("mode", "points", "items", List.of()));
+    ApiController controller = new ApiController(configService, repository, realtimeService, new RequestMetricsService());
+
+    Map<String, Object> result = controller.realtimeViewport(null, null, "2026-04-17T00:30:00.000Z", "30", "121", "38", "124", "41", "12", "ais,radar");
+
+    assertThat(result).containsEntry("mode", "points");
+    verify(realtimeService).viewportResponse(
+        eq(new TimeWindow("2026-04-17 00:00:00", "2026-04-17 00:30:00")),
+        eq(new BBox(121, 38, 124, 41)),
+        eq(12),
+        eq(java.util.Set.of("ais", "radar")));
+    verify(repository, never()).latest(anyString(), anyInt(), any(), anyBoolean(), anyString(), anyString());
   }
 
   @Test
@@ -166,6 +196,98 @@ class ApiControllerTest {
         eq("A1"),
         eq("2026-04-17T00:00:00.000Z"),
         eq("2026-04-17T01:00:00.000Z"));
+  }
+
+  @Test
+  void multiTrackCompactRowsPreserveShipType() {
+    ShipConfigService configService = mock(ShipConfigService.class);
+    TrackRepository repository = mock(TrackRepository.class);
+    RealtimeService realtimeService = mock(RealtimeService.class);
+    when(configService.config()).thenReturn(new ShipTrackConfig());
+    when(realtimeService.validateTimeWindow(anyString(), anyString()))
+        .thenReturn(new TimeWindow("2026-04-17T00:00:00.000Z", "2026-04-17T01:00:00.000Z"));
+    when(repository.trackRows(anyList(), anyString(), anyString(), anyInt(), any(), anyString(), anyString(), any()))
+        .thenReturn(List.of(Map.of(
+            "shipId", "A1",
+            "shipName", "A1",
+            "lng", 122,
+            "lat", 39,
+            "speed", 3,
+            "heading", 4,
+            "isAis", 1,
+            "shipType", 5,
+            "time", "2026-04-17 00:00:00")));
+    ApiController controller = new ApiController(configService, repository, realtimeService, new RequestMetricsService());
+    ApiController.MultiTrackRequest request = new ApiController.MultiTrackRequest();
+    request.shipIds = List.of("A1");
+    request.start = "2026-04-17T00:00:00.000Z";
+    request.end = "2026-04-17T01:00:00.000Z";
+
+    Map<String, Object> result = controller.multi(request);
+
+    assertThat(result.get("fields")).asList().containsSubsequence("isAis", "shipType", "time");
+    assertThat(result.get("items")).asList().hasSize(1);
+    assertThat(((List<?>) ((List<?>) result.get("items")).get(0)).get(7)).isEqualTo(5);
+  }
+
+  @Test
+  void densityPassesOptionalStepMinutes() {
+    ShipConfigService configService = mock(ShipConfigService.class);
+    TrackRepository repository = mock(TrackRepository.class);
+    RealtimeService realtimeService = mock(RealtimeService.class);
+    when(configService.config()).thenReturn(new ShipTrackConfig());
+    when(realtimeService.validateTimeWindow(anyString(), anyString()))
+        .thenReturn(new TimeWindow("2026-04-17T00:00:00.000Z", "2026-04-17T01:00:00.000Z"));
+    when(realtimeService.validateZoom(any())).thenReturn(8);
+    when(repository.density(anyString(), anyString(), any(BBox.class), anyInt(), any())).thenReturn(List.of());
+    ApiController controller = new ApiController(configService, repository, realtimeService, new RequestMetricsService());
+
+    controller.density(
+        "2026-04-17T00:00:00.000Z",
+        "2026-04-17T01:00:00.000Z",
+        null,
+        null,
+        "121",
+        "38",
+        "124",
+        "41",
+        "8",
+        "30");
+
+    verify(repository).density(
+        eq("2026-04-17T00:00:00.000Z"),
+        eq("2026-04-17T01:00:00.000Z"),
+        eq(new BBox(121, 38, 124, 41)),
+        eq(8),
+        eq(30));
+  }
+
+  @Test
+  void densityRejectsInvalidStepBeforeQuery() {
+    ShipConfigService configService = mock(ShipConfigService.class);
+    TrackRepository repository = mock(TrackRepository.class);
+    RealtimeService realtimeService = mock(RealtimeService.class);
+    when(configService.config()).thenReturn(new ShipTrackConfig());
+    when(realtimeService.validateTimeWindow(anyString(), anyString()))
+        .thenReturn(new TimeWindow("2026-04-17T00:00:00.000Z", "2026-04-17T01:00:00.000Z"));
+    when(realtimeService.validateZoom(any())).thenReturn(8);
+    ApiController controller = new ApiController(configService, repository, realtimeService, new RequestMetricsService());
+
+    assertThatThrownBy(() -> controller.density(
+        "2026-04-17T00:00:00.000Z",
+        "2026-04-17T01:00:00.000Z",
+        null,
+        null,
+        "121",
+        "38",
+        "124",
+        "41",
+        "8",
+        "0"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("density step minutes is invalid");
+
+    verify(repository, never()).density(anyString(), anyString(), any(BBox.class), anyInt(), any());
   }
 
   @Test

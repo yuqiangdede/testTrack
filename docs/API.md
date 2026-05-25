@@ -30,33 +30,32 @@ http://127.0.0.1:3001
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `samplingMode` | string | 否 | 抽稀模式。可选值：`auto`、`manual`、`raw`。默认 `auto`。 |
-| `bucketSeconds` | integer | 否 | 手动抽稀桶大小，单位秒。仅 `samplingMode=manual` 时主要生效。最小值为 1。 |
+| `bucketSeconds` | integer | 否 | 手动抽稀粒度，单位秒。服务端归一到 `60`、`300`、`1800`。 |
 | `zoom` | integer | 否 | 当前地图缩放级别。合法范围 3-18。缺省使用配置中的默认缩放级别。 |
 
 `samplingMode` 说明：
 
 | 值 | 说明 |
 | --- | --- |
-| `auto` | 后端根据时间跨度、缩放级别和最大点数配置自动计算抽稀粒度。 |
-| `manual` | 使用 `bucketSeconds` 指定的固定粒度抽稀。 |
-| `raw` | 返回原始轨迹点，不做抽稀。数据量大时可能影响响应和前端渲染速度。 |
+| `auto` | 后端根据缩放级别选择 ClickHouse 固定抽稀粒度。 |
+| `manual` | 使用 `bucketSeconds` 选择 ClickHouse 固定抽稀粒度。 |
+| `raw` | 单船回放返回原始轨迹点，不做抽稀。多船和全域回放会继续使用抽稀轨迹，避免放大查询和渲染压力。 |
 
-当前实现已经引入多级抽稀表：
+当前实现使用 ClickHouse 物化视图维护的固定抽稀表：
 
-- 原始轨迹仍全量写入 `tb_ais_event_simple_info`，接口和任务不修改原始入库逻辑。
-- 新增 `tb_ship_track_simplified` 存储 L0/L1/L2/L3 抽稀轨迹；`tb_ship_simplify_offset` 记录每条船处理进度。
-- `samplingMode=auto` 和 `samplingMode=manual` 会先按 `zoom` 选择 `simplify_level` 并查询抽稀表；抽稀表无数据或抽稀表查询失败时，回退到原有按 bucket 分组的查询。
-- `samplingMode=raw` 始终查询原始表，不查询抽稀表。
+- 原始轨迹表为 `tb_ais_track_raw`。
+- 固定抽稀轨迹表为 `tb_ais_track_thin`，支持 `bucket_size=60/300/1800`。
+- `samplingMode=auto` 和 `samplingMode=manual` 查询固定抽稀表，不回退到原始表 bucket 聚合。
+- `samplingMode=raw` 仅在单船回放查询原始表；多船和全域回放仍查询抽稀表。
 - 轨迹查询接口不在业务 SQL 中增加结果 `LIMIT`；候选船、实时最新船位、密度网格等非轨迹明细接口仍保留各自已有上限。
 
-`zoom` 到 `simplify_level` 的默认映射：
+`zoom` 到抽稀粒度的默认映射：
 
-| zoom 范围 | simplify_level | 说明 |
+| zoom 范围 | bucket_size | 说明 |
 | --- | --- | --- |
-| `<= 7` | `3` | 最粗抽稀，适合低缩放全局视野。 |
-| `8-10` | `2` | 中低缩放抽稀。 |
-| `11-13` | `1` | 中高缩放抽稀。 |
-| `>= 14` | `0` | 最细抽稀层；仍不是原始全量。 |
+| `<= 7` | `1800` | 30 分钟抽稀，适合低缩放全局视野。 |
+| `8-10` | `300` | 5 分钟抽稀。 |
+| `>= 11` | `60` | 1 分钟抽稀；仍不是原始全量。 |
 
 ### 1.3 通用错误响应
 
@@ -182,7 +181,7 @@ GET /api/realtime/latest?timePoint=2026-04-30T08:00:00Z&minutes=10
 `fields` 固定顺序：
 
 ```json
-["shipId", "shipName", "lng", "lat", "speed", "heading", "time", "isAis"]
+["shipId", "shipName", "lng", "lat", "speed", "heading", "time", "isAis", "shipType"]
 ```
 
 响应示例：
@@ -191,7 +190,7 @@ GET /api/realtime/latest?timePoint=2026-04-30T08:00:00Z&minutes=10
 {
   "source": "memory",
   "compact": true,
-  "fields": ["shipId", "shipName", "lng", "lat", "speed", "heading", "time", "isAis"],
+  "fields": ["shipId", "shipName", "lng", "lat", "speed", "heading", "time", "isAis", "shipType"],
   "ready": true,
   "window": {
     "start": "2026-04-30 15:50:00",
@@ -201,8 +200,8 @@ GET /api/realtime/latest?timePoint=2026-04-30T08:00:00Z&minutes=10
   "memoryShips": 2,
   "memoryRows": 2,
   "items": [
-    ["SHIP001", "测试船A", 122.41, 39.21, 10.5, 85.0, "2026-04-30 15:59:58", 1],
-    ["SHIP002", "测试船B", 122.52, 39.33, 8.2, 120.0, "2026-04-30 15:59:55", 1]
+    ["SHIP001", "测试船A", 122.41, 39.21, 10.5, 85.0, "2026-04-30 15:59:58", 1, 1],
+    ["SHIP002", "测试船B", 122.52, 39.33, 8.2, 120.0, "2026-04-30 15:59:55", 1, 5]
   ],
   "nextCursor": "",
   "hasMore": false
@@ -471,7 +470,7 @@ GET /api/analysis/density
 GET /api/tracks/single
 ```
 
-功能描述：查询单艘船在指定时间窗口内的轨迹点，支持自动抽稀、手动抽稀和原始点返回。`auto/manual` 优先返回抽稀表数据；抽稀表没有命中时回退到原有 bucket 查询；`raw` 返回原始表数据。
+功能描述：查询单艘船在指定时间窗口内的轨迹点，支持自动抽稀、手动抽稀和原始点返回。`auto/manual` 查询固定抽稀表；`raw` 返回原始表数据。
 
 请求参数：
 
@@ -482,7 +481,7 @@ GET /api/tracks/single
 | `end` | string | 是 | 窗口结束时间。 |
 | `zoom` | integer | 否 | 当前地图缩放级别。 |
 | `samplingMode` | string | 否 | 抽稀模式：`auto`、`manual`、`raw`。 |
-| `bucketSeconds` | integer | 否 | 手动抽稀桶大小，单位秒。 |
+| `bucketSeconds` | integer | 否 | 手动抽稀粒度，服务端归一到 `60`、`300`、`1800`。 |
 
 请求示例：
 
@@ -502,7 +501,6 @@ GET /api/tracks/single?shipId=SHIP001&start=2026-04-30T07:00:00Z&end=2026-04-30T
 | `items[].speed` | number | 航速。 |
 | `items[].heading` | number | 航向。 |
 | `items[].time` | string | 轨迹点时间。 |
-| `items[].bucket` | integer | fallback 到 bucket 查询时可能返回。抽稀表命中和 `raw` 模式不返回。 |
 
 响应示例：
 
@@ -516,7 +514,6 @@ GET /api/tracks/single?shipId=SHIP001&start=2026-04-30T07:00:00Z&end=2026-04-30T
       "lat": 39.21,
       "speed": 10.5,
       "heading": 85.0,
-      "bucket": 49393200,
       "time": "2026-04-30 15:00:00"
     },
     {
@@ -526,7 +523,6 @@ GET /api/tracks/single?shipId=SHIP001&start=2026-04-30T07:00:00Z&end=2026-04-30T
       "lat": 39.24,
       "speed": 10.8,
       "heading": 88.0,
-      "bucket": 49393201,
       "time": "2026-04-30 15:01:00"
     }
   ]
@@ -539,7 +535,7 @@ GET /api/tracks/single?shipId=SHIP001&start=2026-04-30T07:00:00Z&end=2026-04-30T
 GET /api/tracks/candidates
 ```
 
-功能描述：在多船模式下，根据时间窗口和框选范围查询候选船舶列表。后端使用桶索引表聚合候选船舶，并按船舶类型、点数和船舶编号排序。
+功能描述：在多船模式下，根据时间窗口和框选范围查询候选船舶列表。后端只使用桶索引表聚合空间候选和点数，并按点数和船舶编号排序。
 
 请求参数：
 
@@ -553,12 +549,11 @@ GET /api/tracks/candidates
 | `north` | number | 是 | 框选范围北边界。 |
 | `page` | integer | 否 | 页码，默认 1。 |
 | `pageSize` | integer | 否 | 每页数量，默认 100，最大受配置 `query.maxCandidateBatchSize` 限制。 |
-| `shipTypes` | string | 否 | 船舶类型，逗号分隔。可选 `ais`、`radar`。默认 `ais`。 |
 
 请求示例：
 
 ```http
-GET /api/tracks/candidates?start=2026-04-30T07:00:00Z&end=2026-04-30T08:00:00Z&west=122.1&south=38.9&east=122.8&north=39.6&page=1&pageSize=100&shipTypes=ais,radar
+GET /api/tracks/candidates?start=2026-04-30T07:00:00Z&end=2026-04-30T08:00:00Z&west=122.1&south=38.9&east=122.8&north=39.6&page=1&pageSize=100
 ```
 
 响应字段：
@@ -567,12 +562,10 @@ GET /api/tracks/candidates?start=2026-04-30T07:00:00Z&end=2026-04-30T08:00:00Z&w
 | --- | --- | --- |
 | `items` | object[] | 候选船舶列表。 |
 | `items[].shipId` | string | 船舶编号。 |
-| `items[].shipName` | string | 船名。 |
+| `items[].shipName` | string | 当前三表结构不含船名，返回船舶编号。 |
 | `items[].firstTime` | string | 该船在查询窗口内的最早命中时间。 |
 | `items[].lastTime` | string | 该船在查询窗口内的最晚命中时间。 |
 | `items[].points` | integer | 该船在查询窗口和范围内的点数。 |
-| `items[].isAis` | number | 是否 AIS 船，通常 `1` 表示 AIS，`0` 表示雷达。 |
-| `items[].shipType` | string | 船舶类型：`ais` 或 `radar`。 |
 
 响应示例：
 
@@ -584,9 +577,7 @@ GET /api/tracks/candidates?start=2026-04-30T07:00:00Z&end=2026-04-30T08:00:00Z&w
       "shipName": "测试船A",
       "firstTime": "2026-04-30 15:02:00",
       "lastTime": "2026-04-30 15:58:00",
-      "points": 180,
-      "isAis": 1,
-      "shipType": "ais"
+      "points": 180
     }
   ]
 }
@@ -599,7 +590,7 @@ POST /api/tracks/multi
 Content-Type: application/json
 ```
 
-功能描述：查询多艘船在指定时间窗口内的轨迹点，支持自动抽稀、手动抽稀和原始点返回。后端会按 `maxMultiShips` 限制截断 `shipIds`。`auto/manual` 优先返回抽稀表数据，抽稀表无数据时 fallback 到原有 bucket 查询；`raw` 返回原始表数据。
+功能描述：查询多艘船在指定时间窗口内的轨迹点，支持自动抽稀和手动抽稀。后端会按 `maxMultiShips` 限制截断 `shipIds`。多船回放始终查询固定抽稀表；即使传入 `raw` 也按自动抽稀处理。
 
 请求体字段：
 
@@ -610,7 +601,7 @@ Content-Type: application/json
 | `end` | string | 是 | 窗口结束时间。 |
 | `zoom` | integer | 否 | 当前地图缩放级别。 |
 | `samplingMode` | string | 否 | 抽稀模式：`auto`、`manual`、`raw`。 |
-| `bucketSeconds` | integer | 否 | 手动抽稀桶大小，单位秒。 |
+| `bucketSeconds` | integer | 否 | 手动抽稀粒度，服务端归一到 `60`、`300`、`1800`。 |
 
 说明：
 
@@ -644,7 +635,6 @@ Content-Type: application/json
       "lat": 39.21,
       "speed": 10.5,
       "heading": 85.0,
-      "bucket": 49393200,
       "time": "2026-04-30 15:00:00"
     },
     {
@@ -654,7 +644,6 @@ Content-Type: application/json
       "lat": 39.33,
       "speed": 8.2,
       "heading": 120.0,
-      "bucket": 49393200,
       "time": "2026-04-30 15:00:10"
     }
   ]
@@ -667,7 +656,7 @@ Content-Type: application/json
 GET /api/tracks/global-segment
 ```
 
-功能描述：查询全域范围内某个时间片段的轨迹数据，用于全域回放模式。时间窗口由 `timePoint` 和 `hours` 推算。`auto/manual` 优先返回抽稀表数据，抽稀表无数据时 fallback 到原有 bucket 查询；`raw` 返回原始表数据。
+功能描述：查询全域范围内某个时间片段的轨迹数据，用于全域回放模式。时间窗口由 `timePoint` 和 `hours` 推算。全域回放始终查询固定抽稀位置帧；即使传入 `raw` 也不扫描原始表。
 
 请求参数：
 
@@ -677,7 +666,7 @@ GET /api/tracks/global-segment
 | `hours` | integer | 否 | 向前回看的小时数，默认取配置 `query.globalSegmentHours`。 |
 | `zoom` | integer | 否 | 当前地图缩放级别。 |
 | `samplingMode` | string | 否 | 抽稀模式：`auto`、`manual`、`raw`。 |
-| `bucketSeconds` | integer | 否 | 手动抽稀桶大小，单位秒。 |
+| `bucketSeconds` | integer | 否 | 手动抽稀粒度，服务端归一到 `60`、`300`、`1800`。 |
 
 请求示例：
 
@@ -699,7 +688,6 @@ GET /api/tracks/global-segment?timePoint=2026-04-30T08:00:00Z&hours=1&zoom=8&sam
       "lat": 39.21,
       "speed": 10.5,
       "heading": 85.0,
-      "bucket": 49393200,
       "time": "2026-04-30 15:00:00"
     }
   ]
@@ -734,17 +722,17 @@ GET /ws/realtime
 ## 5. 性能与使用建议
 
 - 船舶加载速度是本项目第一优先级。前端应尽量复用已有统计接口，避免为展示指标重复发起大范围轨迹查询。
-- 大时间跨度轨迹查询优先使用 `samplingMode=auto`，由服务端按 zoom 选择抽稀表 L0/L1/L2/L3。
+- 大时间跨度轨迹查询优先使用 `samplingMode=auto`，由服务端按 zoom 选择固定 `bucket_size`。
 - 只有在需要完整原始点导出或精确核查时使用 `samplingMode=raw`。
 - 多船轨迹查询前，建议先调用 `/api/tracks/candidates` 获取候选船，再按需选择 `shipIds` 调用 `/api/tracks/multi`。
-- 热力图接口 `/api/analysis/density` 必须传入当前视野 bbox，避免查询全域造成不必要压力。
+- 热力图接口 `/api/analysis/density` 必须传入当前视野 bbox，避免查询全域造成不必要压力；态势分析播放由前端按时间片逐帧请求，后端只返回当前时间片的静态热力点。
 - 候选船舶接口的 `pageSize` 会受后端配置上限限制，默认配置最大为 1000。
 
-## 6. 抽稀表与历史回填
+## 6. 抽稀表
 
 抽稀表不是 HTTP API，但会影响轨迹接口的数据来源：
 
-1. 先执行 `db/simplified-tracks.sql` 创建 `tb_ship_track_simplified` 和 `tb_ship_simplify_offset`。
-2. 已有历史原始轨迹通过 `scripts/backfill-simplified-tracks.ps1` 显式回填。
-3. 服务启动后，`TrackSimplificationService` 每 5 分钟按船增量读取原始表，执行 SED-RDP 抽稀，并批量写入抽稀表。
-4. offset 只按每船最后处理到的 `event_time` 单调前进；当前不处理 AIS 乱序、补串和迟到数据。
+1. 原始表使用 `tb_ais_track_raw`。
+2. 固定抽稀表使用 `tb_ais_track_thin`，依赖 ClickHouse 物化视图维护 `bucket_size=60/300/1800`。
+3. 候选船框选使用 `tb_ship_bucket_index` 的时空索引聚合状态。
+4. 项目内旧 `TrackSimplificationService` 默认关闭，页面主链路不依赖旧 SED-RDP 抽稀表。
