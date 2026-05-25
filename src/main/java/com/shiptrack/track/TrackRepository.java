@@ -10,9 +10,12 @@ import com.shiptrack.model.BBox;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.springframework.stereotype.Repository;
 
 @Repository
@@ -135,11 +138,12 @@ public class TrackRepository {
     if (shipId == null || shipId.isBlank()) {
       return 0;
     }
+    List<String> shipIdVariants = shipIdVariants(shipId);
     ShipTrackConfig.Columns c = config.columns;
     List<Map<String, Object>> rows = clickHouse.query("""
         SELECT count() AS trackPoints
         FROM %s
-        PREWHERE %s = {shipId: String}
+        PREWHERE %s IN {shipIdVariants: Array(String)}
         WHERE %s >= %s
           AND %s < %s
         """.formatted(
@@ -147,7 +151,7 @@ public class TrackRepository {
         ident(c.shipId),
         ident(c.eventTime), sqlDateParam("start"),
         ident(c.eventTime), sqlDateParam("end")),
-        params("shipId", shipId, "start", start, "end", end));
+        params("shipIdVariants", shipIdVariants, "start", start, "end", end));
     Map<String, Object> row = rows.isEmpty() ? Map.of() : rows.get(0);
     return toLong(row.get("trackPoints"));
   }
@@ -156,11 +160,12 @@ public class TrackRepository {
     if (shipIds == null || shipIds.isEmpty()) {
       return 0;
     }
+    List<String> shipIdVariants = shipIdVariants(shipIds);
     ShipTrackConfig.Columns c = config.columns;
     List<Map<String, Object>> rows = clickHouse.query("""
         SELECT count() AS trackPoints
         FROM %s
-        WHERE %s IN {shipIds: Array(String)}
+        WHERE %s IN {shipIdVariants: Array(String)}
           AND %s >= %s
           AND %s < %s
         """.formatted(
@@ -168,7 +173,7 @@ public class TrackRepository {
         ident(c.shipId),
         ident(c.eventTime), sqlDateParam("start"),
         ident(c.eventTime), sqlDateParam("end")),
-        params("shipIds", shipIds, "start", start, "end", end));
+        params("shipIdVariants", shipIdVariants, "start", start, "end", end));
     Map<String, Object> row = rows.isEmpty() ? Map.of() : rows.get(0);
     return toLong(row.get("trackPoints"));
   }
@@ -323,14 +328,14 @@ public class TrackRepository {
         ORDER BY points DESC, shipId ASC
         LIMIT {limit: UInt32} OFFSET {offset: UInt32}
         """.formatted(
-        ident(ic.shipId),
-        ident(ic.shipId),
+        trimExpr(ident(ic.shipId)),
+        trimExpr(ident(ic.shipId)),
         ident(ic.bucketStart),
         ident(ic.bucketStart),
         ident(config.tables.bucketIndex),
         ident(ic.bucketStart), sqlDateParam("start"),
         ident(ic.bucketStart), sqlDateParam("end"),
-        ident(ic.shipId),
+        trimExpr(ident(ic.shipId)),
         ident(ic.maxLng),
         ident(ic.minLng),
         ident(ic.maxLat),
@@ -397,8 +402,12 @@ public class TrackRepository {
     if (shipIds == null || shipIds.isEmpty()) {
       return List.of();
     }
-    if ("single".equals(mode) && shipIds.size() == 1) {
-      return singleTrackRows(shipIds.get(0), start, end, zoom, bbox, samplingMode, bucketSeconds);
+    List<String> normalizedShipIds = normalizeShipIds(shipIds);
+    if (normalizedShipIds.isEmpty()) {
+      return List.of();
+    }
+    if ("single".equals(mode) && normalizedShipIds.size() == 1) {
+      return singleTrackRows(normalizedShipIds.get(0), start, end, zoom, bbox, samplingMode, bucketSeconds);
     }
     ShipTrackConfig.Columns c = config.columns;
     SamplingPlan sampling = resolveSamplingPlan(samplingMode, bucketSeconds, zoom, start, end, config.query.maxTrackPointsPerShip, mode);
@@ -419,14 +428,14 @@ public class TrackRepository {
             %s AS shipType,
             toString(%s) AS time
           FROM %s
-          WHERE %s IN {shipIds: Array(String)}
+          WHERE %s IN {shipIdVariants: Array(String)}
             AND %s >= %s
             AND %s < %s
             %s
           ORDER BY time ASC, shipId ASC
           """.formatted(
-          ident(c.shipId),
-          ident(c.shipId),
+          trimExpr(ident(c.shipId)),
+          trimExpr(ident(c.shipId)),
           ident(c.longitude),
           ident(c.latitude),
           ident(c.speed),
@@ -439,11 +448,11 @@ public class TrackRepository {
           ident(c.eventTime), sqlDateParam("start"),
           ident(c.eventTime), sqlDateParam("end"),
           bboxFilter);
-      Map<String, Object> params = params("shipIds", shipIds, "start", start, "end", end);
+      Map<String, Object> params = params("shipIdVariants", shipIdVariants(normalizedShipIds), "start", start, "end", end);
       putBbox(params, bbox);
       return clickHouse.query(query, params);
     }
-    return thinTrackRows(shipIds, start, end, sampling.bucketSeconds(), bbox);
+    return thinTrackRows(normalizedShipIds, start, end, sampling.bucketSeconds(), bbox);
   }
 
   public List<Map<String, Object>> singleTrackRows(String shipId, String start, String end, int zoom, BBox bbox,
@@ -451,6 +460,7 @@ public class TrackRepository {
     if (shipId == null || shipId.isBlank()) {
       return List.of();
     }
+    String normalizedShipId = shipId.trim();
     ShipTrackConfig.Columns c = config.columns;
     SamplingPlan sampling = resolveSamplingPlan(samplingMode, bucketSeconds, zoom, start, end, config.query.maxSingleTrackPoints, "single");
     String bboxFilter = bbox == null ? "" : """
@@ -461,7 +471,7 @@ public class TrackRepository {
       String query = """
           SELECT
             {shipId: String} AS shipId,
-            %s AS shipName,
+            {shipId: String} AS shipName,
             %s AS lng,
             %s AS lat,
             %s AS speed,
@@ -470,13 +480,12 @@ public class TrackRepository {
             %s AS shipType,
             toString(%s) AS time
           FROM %s
-           PREWHERE %s = {shipId: String}
+           PREWHERE %s IN {shipIdVariants: Array(String)}
            WHERE %s >= %s
              AND %s < %s
              %s
            ORDER BY time ASC
            """.formatted(
-          ident(c.shipId),
           ident(c.longitude),
           ident(c.latitude),
           ident(c.speed),
@@ -489,11 +498,11 @@ public class TrackRepository {
            ident(c.eventTime), sqlDateParam("start"),
            ident(c.eventTime), sqlDateParam("end"),
            bboxFilter);
-      Map<String, Object> params = params("shipId", shipId, "start", start, "end", end);
+      Map<String, Object> params = params("shipId", normalizedShipId, "shipIdVariants", shipIdVariants(normalizedShipId), "start", start, "end", end);
       putBbox(params, bbox);
       return clickHouse.query(query, params);
     }
-    return thinSingleTrackRows(shipId, start, end, sampling.bucketSeconds(), bbox);
+    return thinSingleTrackRows(normalizedShipId, start, end, sampling.bucketSeconds(), bbox);
   }
 
   public List<Map<String, Object>> globalSegment(String start, String end, int zoom, String samplingMode, Integer bucketSeconds) {
@@ -535,6 +544,7 @@ public class TrackRepository {
 
   private List<Map<String, Object>> thinTrackRows(List<String> shipIds, String start, String end, int bucketSeconds, BBox bbox) {
     ShipTrackConfig.Columns c = config.columns;
+    List<String> shipIdVariants = shipIdVariants(shipIds);
     String bboxFilter = bbox == null ? "" : """
         AND %s BETWEEN {west: Float64} AND {east: Float64}
         AND %s BETWEEN {south: Float64} AND {north: Float64}
@@ -552,7 +562,7 @@ public class TrackRepository {
           toString(%s) AS time
         FROM %s
         WHERE bucket_size = {bucketSeconds: UInt32}
-          AND %s IN {shipIds: Array(String)}
+          AND %s IN {shipIdVariants: Array(String)}
           AND bucket_start >= %s - toIntervalSecond({bucketSeconds: UInt32})
           AND bucket_start < %s
           AND %s >= %s
@@ -560,8 +570,8 @@ public class TrackRepository {
           %s
         ORDER BY time ASC, shipId ASC
         """.formatted(
-        ident(c.shipId),
-        ident(c.shipId),
+        trimExpr(ident(c.shipId)),
+        trimExpr(ident(c.shipId)),
         ident(c.longitude),
         ident(c.latitude),
         ident(c.speed),
@@ -576,7 +586,7 @@ public class TrackRepository {
         ident(c.eventTime), sqlDateParam("start"),
         ident(c.eventTime), sqlDateParam("end"),
         bboxFilter);
-    Map<String, Object> params = params("shipIds", shipIds, "start", start, "end", end, "bucketSeconds", bucketSeconds);
+    Map<String, Object> params = params("shipIdVariants", shipIdVariants, "start", start, "end", end, "bucketSeconds", bucketSeconds);
     putBbox(params, bbox);
     return clickHouse.query(query, params);
   }
@@ -590,7 +600,7 @@ public class TrackRepository {
     String query = """
         SELECT
           {shipId: String} AS shipId,
-          %s AS shipName,
+          {shipId: String} AS shipName,
           %s AS lng,
           %s AS lat,
           %s AS speed,
@@ -599,7 +609,7 @@ public class TrackRepository {
           %s AS shipType,
           toString(%s) AS time
         FROM %s
-        PREWHERE %s = {shipId: String}
+        PREWHERE %s IN {shipIdVariants: Array(String)}
         WHERE bucket_size = {bucketSeconds: UInt32}
           AND bucket_start >= %s - toIntervalSecond({bucketSeconds: UInt32})
           AND bucket_start < %s
@@ -608,7 +618,6 @@ public class TrackRepository {
           %s
         ORDER BY time ASC
         """.formatted(
-        ident(c.shipId),
         ident(c.longitude),
         ident(c.latitude),
         ident(c.speed),
@@ -623,7 +632,8 @@ public class TrackRepository {
         ident(c.eventTime), sqlDateParam("start"),
         ident(c.eventTime), sqlDateParam("end"),
         bboxFilter);
-    Map<String, Object> params = params("shipId", shipId, "start", start, "end", end, "bucketSeconds", bucketSeconds);
+    String normalizedShipId = shipId.trim();
+    Map<String, Object> params = params("shipId", normalizedShipId, "shipIdVariants", shipIdVariants(normalizedShipId), "start", start, "end", end, "bucketSeconds", bucketSeconds);
     putBbox(params, bbox);
     return clickHouse.query(query, params);
   }
@@ -702,6 +712,34 @@ public class TrackRepository {
 
   private String isAisExpr(String typeExpr) {
     return "if(%s IN (1, 4, 5, 7), toUInt8(1), toUInt8(0))".formatted(typeExpr);
+  }
+
+  private String trimExpr(String expression) {
+    return "trim(%s)".formatted(expression);
+  }
+
+  private List<String> normalizeShipIds(List<String> shipIds) {
+    return shipIds.stream()
+        .filter(id -> id != null && !id.isBlank())
+        .map(String::trim)
+        .distinct()
+        .toList();
+  }
+
+  private List<String> shipIdVariants(List<String> shipIds) {
+    Set<String> variants = new LinkedHashSet<>();
+    for (String shipId : shipIds) {
+      variants.addAll(shipIdVariants(shipId));
+    }
+    return new ArrayList<>(variants);
+  }
+
+  private List<String> shipIdVariants(String shipId) {
+    String normalized = shipId == null ? "" : shipId.trim();
+    if (normalized.isBlank()) {
+      return List.of();
+    }
+    return List.of(normalized, " " + normalized, normalized + " ", " " + normalized + " ");
   }
 
   private int realtimeDeltaLimit() {

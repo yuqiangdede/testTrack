@@ -271,6 +271,8 @@ class TrackRepositoryLogicTest {
     ArgumentCaptor<Map<String, Object>> paramsCaptor = ArgumentCaptor.forClass(Map.class);
     verify(clickHouse).query(sqlCaptor.capture(), paramsCaptor.capture());
     assertThat(sqlCaptor.getValue()).contains("countMerge(point_count) AS points");
+    assertThat(sqlCaptor.getValue()).contains("trim(`ship_serial_no`) AS shipId");
+    assertThat(sqlCaptor.getValue()).contains("GROUP BY trim(`ship_serial_no`)");
     assertThat(sqlCaptor.getValue()).contains("minMerge(`min_lng`) <= {east: Float64}");
     assertThat(sqlCaptor.getValue()).contains("FROM `tb_ship_bucket_index`");
     assertThat(sqlCaptor.getValue()).doesNotContain("FROM `tb_ais_track_thin`");
@@ -389,10 +391,10 @@ class TrackRepositoryLogicTest {
     ArgumentCaptor<Map<String, Object>> paramsCaptor = ArgumentCaptor.forClass(Map.class);
     verify(clickHouse).query(sqlCaptor.capture(), paramsCaptor.capture());
     assertThat(sqlCaptor.getValue()).contains("count() AS trackPoints");
-    assertThat(sqlCaptor.getValue()).contains("PREWHERE `ship_serial_no` = {shipId: String}");
+    assertThat(sqlCaptor.getValue()).contains("PREWHERE `ship_serial_no` IN {shipIdVariants: Array(String)}");
     assertThat(sqlCaptor.getValue()).contains("`event_time` >= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')");
     assertThat(sqlCaptor.getValue()).contains("`event_time` < parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai')");
-    assertThat(paramsCaptor.getValue()).containsEntry("shipId", "A1")
+    assertThat(paramsCaptor.getValue()).containsEntry("shipIdVariants", List.of("A1", " A1", "A1 ", " A1 "))
         .containsEntry("start", "2026-04-17T00:00:00.000Z")
         .containsEntry("end", "2026-04-17T01:00:00.000Z");
   }
@@ -410,10 +412,10 @@ class TrackRepositoryLogicTest {
     ArgumentCaptor<Map<String, Object>> paramsCaptor = ArgumentCaptor.forClass(Map.class);
     verify(clickHouse).query(sqlCaptor.capture(), paramsCaptor.capture());
     assertThat(sqlCaptor.getValue()).contains("count() AS trackPoints");
-    assertThat(sqlCaptor.getValue()).contains("`ship_serial_no` IN {shipIds: Array(String)}");
+    assertThat(sqlCaptor.getValue()).contains("`ship_serial_no` IN {shipIdVariants: Array(String)}");
     assertThat(sqlCaptor.getValue()).contains("`event_time` >= parseDateTime64BestEffort({start: String}, 3, 'Asia/Shanghai')");
     assertThat(sqlCaptor.getValue()).contains("`event_time` < parseDateTime64BestEffort({end: String}, 3, 'Asia/Shanghai')");
-    assertThat(paramsCaptor.getValue()).containsEntry("shipIds", List.of("A1", "B2"))
+    assertThat(paramsCaptor.getValue()).containsEntry("shipIdVariants", List.of("A1", " A1", "A1 ", " A1 ", "B2", " B2", "B2 ", " B2 "))
         .containsEntry("start", "2026-04-17T00:00:00.000Z")
         .containsEntry("end", "2026-04-17T01:00:00.000Z");
   }
