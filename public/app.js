@@ -120,6 +120,7 @@
     rectangleLayer: null,
     drawBoxInteraction: null,
     lines: [],
+    lineByShip: new Map(),
     lineQueue: [],
     lineTimer: null,
     hoverTrackShip: null,
@@ -2629,6 +2630,7 @@ function renderTracks() {
   state.layers.endpointSource?.clear();
   state.layers.hoverTrackShip = null;
   state.layers.lines = [];
+  state.layers.lineByShip.clear();
   preparePlaybackRuntime();
   state.layers.lineQueue = state.mode === "single"
     ? state.playback.groupedTracks.map(({ ship, points, index }) => ({ ship, points, index, palette: SINGLE_TRACK_PALETTE }))
@@ -2662,12 +2664,49 @@ function drawLineBatch() {
     }));
     state.layers.trackSource?.addFeature(line);
     state.layers.lines.push(line);
+    state.layers.lineByShip.set(ship, line);
   });
   if (state.layers.lineQueue.length) {
     state.layers.lineTimer = setTimeout(drawLineBatch, 16);
   } else {
     flushTrackRenderCallbacks();
   }
+}
+
+function baseTrackPalette() {
+  return state.mode === "single" ? SINGLE_TRACK_PALETTE : TRACK_PALETTE;
+}
+
+function renderBaseTrackForShip(ship) {
+  if (!state.layers.trackSource || !state.playback.prepared) return;
+  const existing = state.layers.lineByShip.get(ship);
+  if (existing) {
+    state.layers.trackSource.removeFeature(existing);
+    state.layers.lines = state.layers.lines.filter((line) => line !== existing);
+    state.layers.lineByShip.delete(ship);
+  }
+  const trackIndex = state.playback.groupedTracks.findIndex((track) => track.ship === ship);
+  if (trackIndex < 0) return;
+  const points = state.playback.groupedTracks[trackIndex].points || [];
+  const path = points.map((point) => point._mapCoordinate || toMapCoordinate(point));
+  if (path.length < 2) return;
+  const palette = baseTrackPalette();
+  const line = new ol.Feature({
+    geometry: new ol.geom.LineString(path),
+    ship,
+    points: points.length
+  });
+  line.setStyle(new ol.style.Style({
+    stroke: new ol.style.Stroke({
+      color: withOpacity(palette[trackIndex % palette.length], TRACK_LINE_OPACITY),
+      width: state.mode === "global" ? 2 : 4,
+      lineJoin: "round",
+      lineCap: "round"
+    })
+  }));
+  state.layers.trackSource.addFeature(line);
+  state.layers.lines.push(line);
+  state.layers.lineByShip.set(ship, line);
 }
 
 function extensionHandleStyle() {
@@ -2697,6 +2736,7 @@ function renderTrackExtensionHandles(ship) {
     ].forEach(({ point, direction }) => {
       const feature = new ol.Feature({
         geometry: new ol.geom.Point(point._mapCoordinate || toMapCoordinate(point)),
+        ship,
         extendTrack: direction
       });
       feature.setStyle(extensionHandleStyle());
@@ -2726,16 +2766,18 @@ function clearTrackExtensionHover() {
 function handleTrackExtensionClick(event) {
   if (!["single", "multi"].includes(state.mode) || !state.map) return false;
   let direction = "";
+  let ship = "";
   state.map.forEachFeatureAtPixel(event.pixel, (feature) => {
     direction = feature.get("extendTrack") || direction;
+    ship = feature.get("ship") || ship;
     return direction ? feature : undefined;
   }, { layerFilter: (layer) => layer === state.layers.endpointLayer, hitTolerance: 8 });
   if (!direction) return false;
-  extendActiveTrackWindow(direction);
+  extendActiveTrackWindow(direction, ship || state.layers.hoverTrackShip);
   return true;
 }
 
-function extendActiveTrackWindow(direction) {
+function extendActiveTrackWindow(direction, ship) {
   pausePlayback();
   if (state.mode === "single") {
     const input = direction === "start" ? $("single-before-hours") : $("single-after-hours");
@@ -2743,12 +2785,74 @@ function extendActiveTrackWindow(direction) {
     loadSingleTrack().catch((error) => showError(error.message));
     return;
   }
+  extendMultiShipTrackWindow(direction, ship).catch((error) => showError(error.message));
+}
+
+function mergedTrackPointsForShip(ship, shipPoints) {
+  const nextPoints = state.trackPoints
+    .filter((point) => point.shipId !== ship)
+    .concat(shipPoints || []);
+  nextPoints.sort((a, b) => {
+    const timeDiff = pointTimeMillis(a) - pointTimeMillis(b);
+    return timeDiff || String(a.shipId || "").localeCompare(String(b.shipId || ""));
+  });
+  return assignPlaybackHeadings(nextPoints);
+}
+
+function nearestPlaybackIndexByTime(timeMillis) {
+  if (!state.trackPoints.length || !Number.isFinite(timeMillis)) return 0;
+  let nearestIndex = 0;
+  let nearestDiff = Infinity;
+  state.trackPoints.forEach((point, index) => {
+    const diff = Math.abs(pointTimeMillis(point) - timeMillis);
+    if (diff < nearestDiff) {
+      nearestDiff = diff;
+      nearestIndex = index;
+    }
+  });
+  return nearestIndex;
+}
+
+async function extendMultiShipTrackWindow(direction, ship) {
+  if (!ship) return;
   const input = direction === "start" ? $("start") : $("end");
   const date = input?.value ? new Date(input.value) : null;
   if (!date || !Number.isFinite(date.getTime())) return;
-  date.setHours(date.getHours() + (direction === "start" ? -TRACK_EXTENSION_HOURS : TRACK_EXTENSION_HOURS));
-  input.value = toLocalDatetime(date);
-  loadMultiTrack().catch((error) => showError(error.message));
+  const currentWindow = multiTimeWindowParams();
+  if (!currentWindow) return;
+  const extendedDate = new Date(date);
+  extendedDate.setHours(extendedDate.getHours() + (direction === "start" ? -TRACK_EXTENSION_HOURS : TRACK_EXTENSION_HOURS));
+  const queryWindow = {
+    start: direction === "start" ? extendedDate.toISOString() : currentWindow.start,
+    end: direction === "end" ? extendedDate.toISOString() : currentWindow.end
+  };
+  const activeMillis = pointTimeMillis(state.trackPoints[state.playIndex]);
+  const trace = beginApiTrace("多船单轨迹延长");
+  setStatus(`正在延长船舶 ${ship} 轨迹`);
+  try {
+    const sampling = activeSamplingParams();
+    const params = qs({
+      shipId: ship,
+      ...queryWindow,
+      zoom: getMapZoom(),
+      samplingMode: sampling.samplingMode,
+      bucketSeconds: sampling.bucketSeconds
+    });
+    const data = await getJson(`/api/tracks/single?${params}`, { trace, requestKey: `multi-track-extend-${ship}` });
+    const shipPoints = assignPlaybackHeadings(normalizeTrackItems(data));
+    state.trackPoints = mergedTrackPointsForShip(ship, shipPoints);
+    state.playIndex = nearestPlaybackIndexByTime(activeMillis);
+    preparePlaybackRuntime();
+    renderBaseTrackForShip(ship);
+    renderTrackExtensionHandles(ship);
+    renderPlaybackMarkers();
+    state.multi.selectedSampledTrackPoints = state.trackPoints.length;
+    updateMetrics();
+    syncPlayButtons();
+    setStatus(`已延长船舶 ${ship} 轨迹，当前多船轨迹 ${state.trackPoints.length.toLocaleString()} 个${playbackPointLabel()}`);
+  } finally {
+    finishApiTrace(trace);
+  }
 }
 
 function updatePlaybackTrail() {
